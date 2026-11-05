@@ -39,15 +39,17 @@
     }
 </script>
 
-<body data-signals="{'client_id': ''}"
+<body class="min-h-screen" data-signals="{'client_id': ''}"
     data-on-load="$client_id = localStorage.getItem('client_id'); @get('/client/load')" data-theme="forest">
 
-    <div class="bg-base-300 absolute w-full t-0">
+    <div class="flex min-h-screen flex-col bg-base-300">
         {% include "navbar.html.j2" %}
 
         <!-- Content -->
-        {% block content %}
-        {% endblock content %}
+        <main class="flex-1">
+            {% block content %}
+            {% endblock content %}
+        </main>
 
         <!-- DEBUG: Display all signals -->
 

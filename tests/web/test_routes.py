@@ -90,6 +90,26 @@ def read_response(response):
     return asyncio.run(run())
 
 
+def test_workspace_template_places_search_and_downloads_together():
+    rendered = routes.templates.get_template("workspace.html.j2").render(
+        search_term="grenade", placeholder_item="Search Spotify"
+    )
+
+    assert 'id="search-input"' in rendered
+    assert 'id="search-list"' in rendered
+    assert 'id="download-list"' in rendered
+    assert "grid-cols-1" in rendered
+    assert "lg:grid-cols-" in rendered
+
+
+def test_download_list_renders_empty_state():
+    rendered = routes.templates.get_template("download-list.html.j2").render(
+        client_song_downloads=[]
+    )
+
+    assert "No active downloads." in rendered
+
+
 def test_search_limits_results(monkeypatch):
     search_calls = []
 

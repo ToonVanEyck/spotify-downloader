@@ -56,7 +56,7 @@ async def search(q: Optional[str], request: Request):
     """
     return templates.TemplateResponse(
         request=request,
-        name="search.html.j2",
+        name="home.html.j2",
         context={"__version__": __version__, "search_term": q},
     )
 
@@ -68,10 +68,8 @@ async def downloads(request: Request):
     """
     return templates.TemplateResponse(
         request=request,
-        name="downloads.html.j2",
-        context={
-            "__version__": __version__,
-        },
+        name="home.html.j2",
+        context={"__version__": __version__, "search_term": ""},
     )
 
 

@@ -1,0 +1,50 @@
+<div class="mx-auto w-full max-w-screen-2xl px-4 pb-10 sm:px-6 lg:px-8"
+    data-signals='{"search_term": {{ search_term|default("", true)|tojson }}, "loading": false}'>
+    <section class="mx-auto w-full max-w-3xl py-8 sm:py-10" aria-label="Search Spotify">
+        <div id="search-input" class="join flex w-full shadow-md"
+            data-on-load="@get('/client/component/search-input-rotating-placeholder')">
+            {% include "search-input-rotating-placeholder.html.j2" %}
+            <button id="search-button" class="btn btn-primary join-item px-5"
+                data-on-click="$search_term.trim() !== '' && goto('/search?q=' + encodeURIComponent($search_term))"
+                title="Search Spotify">
+                <iconify-icon icon="clarity:search-line" style="font-size: 24px"></iconify-icon>
+                <span class="sr-only">Search</span>
+            </button>
+        </div>
+    </section>
+
+    <div class="grid grid-cols-1 gap-8 lg:grid-cols-[minmax(0,1.7fr)_minmax(18rem,0.9fr)] lg:gap-10">
+        <section class="min-w-0" aria-labelledby="results-heading">
+            <div class="mb-4 flex items-baseline justify-between border-b border-base-content/10 pb-3">
+                <h1 id="results-heading" class="text-xl font-semibold">Search results</h1>
+                {% if search_term %}
+                <span class="max-w-[50%] truncate text-sm text-base-content/60">{{ search_term }}</span>
+                {% endif %}
+            </div>
+
+            {% if search_term %}
+            <div id="search-list" data-on-load="@get('/client/search')">
+                <div class="py-8 text-center text-sm text-base-content/60" role="status">
+                    <span class="loading loading-spinner loading-sm mr-2 align-middle"></span>
+                    Searching Spotify...
+                </div>
+            </div>
+            {% else %}
+            <div id="search-list" class="py-10 text-center text-sm text-base-content/50"></div>
+            {% endif %}
+        </section>
+
+        <aside class="min-w-0 lg:sticky lg:top-4 lg:self-start" aria-labelledby="downloads-heading">
+            <div class="mb-4 flex items-baseline justify-between border-b border-base-content/10 pb-3">
+                <h2 id="downloads-heading" class="text-xl font-semibold">Downloads</h2>
+                <a class="link link-hover text-sm text-base-content/60" href="/downloads">Open queue</a>
+            </div>
+            <div id="download-list" data-on-load="@get('/client/downloads')">
+                <div class="py-6 text-sm text-base-content/60" role="status">
+                    <span class="loading loading-spinner loading-sm mr-2 align-middle"></span>
+                    Loading downloads...
+                </div>
+            </div>
+        </aside>
+    </div>
+</div>
