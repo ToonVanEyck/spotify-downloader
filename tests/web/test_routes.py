@@ -78,6 +78,152 @@ def post_settings(settings):
     return asyncio.run(run())
 
 
+def read_response(response):
+    async def run():
+        return "".join(
+            [
+                chunk if isinstance(chunk, str) else chunk.decode()
+                async for chunk in response.body_iterator
+            ]
+        )
+
+    return asyncio.run(run())
+
+
+def test_search_limits_results(monkeypatch):
+    search_calls = []
+
+    def fake_search(search_term, limit=None):
+        search_calls.append((search_term, limit))
+        return {
+            "artists": [
+                {
+                    "kind": "Artist",
+                    "name": "Bruno Mars",
+                    "url": "https://open.spotify.com/artist/id",
+                }
+            ],
+            "tracks": [
+                {
+                    "kind": "Track",
+                    "name": "Grenade",
+                    "url": "https://open.spotify.com/track/id",
+                }
+            ],
+            "albums": [
+                {
+                    "kind": "Album",
+                    "name": "Doo-Wops & Hooligans",
+                    "url": "https://open.spotify.com/album/id",
+                }
+            ],
+            "playlists": [
+                {
+                    "kind": "Playlist",
+                    "name": "Grenade Mix",
+                    "url": "https://open.spotify.com/playlist/id",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(routes, "get_search_suggestions", fake_search)
+
+    response = asyncio.run(
+        routes.handle_get_client_search(
+            {"client_id": "test-client", "search_term": "query"}
+        )
+    )
+    response_text = read_response(response)
+
+    assert search_calls == [("query", 10)]
+    assert all(
+        title in response_text for title in ["Artists", "Tracks", "Albums", "Playlists"]
+    )
+    assert "Grenade" in response_text
+    assert "&#34;https://open.spotify.com/track/id&#34;" in response_text
+
+
+def test_search_timeout_replaces_loading_state(monkeypatch):
+    async def timeout(*args, **kwargs):
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(routes.asyncio, "to_thread", timeout)
+
+    response = asyncio.run(
+        routes.handle_get_client_search(
+            {"client_id": "test-client", "search_term": "query"}
+        )
+    )
+
+    assert "Search timed out after 30 seconds" in read_response(response)
+
+
+@pytest.mark.parametrize("collection", ["track", "album", "playlist", "artist"])
+def test_search_url_shows_preview_without_downloading(monkeypatch, collection):
+    url = f"https://open.spotify.com/{collection}/example"
+    preview = {
+        "kind": collection.title(),
+        "name": f"Example {collection}",
+        "subtitle": "Preview metadata",
+        "cover_url": None,
+        "url": url,
+    }
+
+    monkeypatch.setattr(routes, "get_spotify_url_preview", lambda _: preview)
+    monkeypatch.setattr(
+        routes,
+        "get_simple_songs",
+        lambda *args, **kwargs: pytest.fail("Preview should not start a download"),
+    )
+
+    response = asyncio.run(
+        routes.handle_get_client_search(
+            {
+                "client_id": "test-client",
+                "search_term": url,
+            }
+        )
+    )
+    response_text = read_response(response)
+
+    assert preview["name"] in response_text
+    assert "Spotify link" in response_text
+    assert "Download" in response_text
+    assert "Preparing download" not in response_text
+
+
+def test_download_button_starts_collection_download(client, monkeypatch):
+    monkeypatch.setattr(app_state, "web_settings", {}, raising=False)
+    songs = [SimpleNamespace(name="first"), SimpleNamespace(name="second")]
+    parsed_queries = []
+    downloaded_songs = []
+    url = "https://open.spotify.com/album/example"
+
+    def fake_get_simple_songs(query, **kwargs):
+        parsed_queries.append(query)
+        return songs
+
+    async def fake_pool_download(song):
+        downloaded_songs.append(song)
+        return song, "downloaded"
+
+    monkeypatch.setattr(routes, "get_simple_songs", fake_get_simple_songs)
+    monkeypatch.setattr(
+        client.downloader, "pool_download", fake_pool_download, raising=False
+    )
+
+    response = asyncio.run(
+        routes.handle_post_client_download(
+            {"client_id": "test-client", "song_url": url}
+        )
+    )
+    response_text = read_response(response)
+
+    assert parsed_queries == [[url]]
+    assert downloaded_songs == songs
+    assert "Download complete" in response_text
+
+
 @pytest.mark.parametrize(
     "key, value",
     [

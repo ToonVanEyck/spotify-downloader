@@ -181,29 +181,77 @@ class Song:
         )
 
     @classmethod
-    def list_from_search_term(cls, search_term: str) -> "List[Song]":
+    def from_search_result(cls, result: Dict[str, Any]) -> "Song":
+        """Create a lightweight Song from a Spotify search result."""
+
+        artists = result.get("artists") or []
+        album = result.get("album") or {}
+        album_artists = album.get("artists") or []
+        images = album.get("images") or []
+        release_date = album.get("release_date") or ""
+        year_text = release_date[:4]
+        copyrights = album.get("copyrights") or []
+
+        return cls.from_missing_data(
+            name=result.get("name"),
+            artists=[artist.get("name", "") for artist in artists],
+            artist=artists[0].get("name") if artists else None,
+            artist_id=artists[0].get("id") if artists else None,
+            album_id=album.get("id"),
+            album_name=album.get("name"),
+            album_artist=(
+                album_artists[0].get("name")
+                if album_artists
+                else (artists[0].get("name") if artists else None)
+            ),
+            album_type=album.get("album_type"),
+            disc_number=result.get("disc_number"),
+            duration=(
+                int(result["duration_ms"] / 1000)
+                if result.get("duration_ms") is not None
+                else None
+            ),
+            date=release_date or None,
+            year=int(year_text) if year_text.isdigit() else None,
+            track_number=result.get("track_number"),
+            tracks_count=album.get("total_tracks"),
+            song_id=result.get("id"),
+            explicit=result.get("explicit"),
+            publisher=album.get("label"),
+            url=(result.get("external_urls") or {}).get("spotify"),
+            isrc=(result.get("external_ids") or {}).get("isrc"),
+            cover_url=(
+                max(
+                    images,
+                    key=lambda image: image.get("width", 0) * image.get("height", 0),
+                ).get("url")
+                if images
+                else None
+            ),
+            copyright_text=(copyrights[0].get("text") if copyrights else None),
+        )
+
+    @classmethod
+    def list_from_search_term(
+        cls, search_term: str, limit: Optional[int] = None
+    ) -> "List[Song]":
         """
         Creates a list of Song objects from a search term.
 
         ### Arguments
         - search_term: The search term to use.
+        - limit: The maximum number of songs to return, or None for no limit.
 
         ### Returns
         - The list of Song objects.
         """
 
         raw_search_results = Song.search(search_term)
+        items = raw_search_results.get("tracks", {}).get("items", [])
+        if limit is not None:
+            items = items[:limit]
 
-        songs = []
-        for idx, _ in enumerate(raw_search_results.get("tracks", []).get("items", [])):
-            songs.append(
-                Song.from_url(
-                    "http://open.spotify.com/track/"
-                    + raw_search_results["tracks"]["items"][idx]["id"]
-                )
-            )
-
-        return songs
+        return [cls.from_search_result(item) for item in items]
 
     @classmethod
     def from_data_dump(cls, data: str) -> "Song":

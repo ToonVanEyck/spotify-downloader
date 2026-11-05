@@ -17,10 +17,13 @@ from fastapi.templating import Jinja2Templates
 
 from spotdl._version import __version__
 from spotdl.download.downloader import AUDIO_PROVIDERS, LYRICS_PROVIDERS
-from spotdl.types.song import Song
 from spotdl.utils.config import get_spotdl_path
 from spotdl.utils.ffmpeg import FFMPEG_FORMATS
-from spotdl.utils.search import get_search_results
+from spotdl.utils.search import (
+    get_search_suggestions,
+    get_simple_songs,
+    get_spotify_url_preview,
+)
 from spotdl.utils.web import Client, app_state, validate_search_term
 from spotdl.web.utils import Signals, datastar_response, handle_signals
 
@@ -131,20 +134,34 @@ async def handle_get_client_search(datastar_signals: ReadSignals):
     app_state.logger.info(f"[{signals.client_id}] Search term: {signals.search_term}")
     is_valid_url = validate_search_term(signals.search_term)
 
-    if is_valid_url:
-        # redirect client to downloads page
-        app_state.logger.info(
-            f"[{signals.client_id}] Valid URL detected, redirecting to downloads..."
+    error = None
+    preview = None
+    suggestions = {"artists": [], "tracks": [], "albums": []}
+    try:
+        if is_valid_url:
+            preview = await asyncio.wait_for(
+                asyncio.to_thread(get_spotify_url_preview, signals.search_term),
+                timeout=30,
+            )
+        else:
+            suggestions = await asyncio.wait_for(
+                asyncio.to_thread(
+                    get_search_suggestions, signals.search_term, limit=10
+                ),
+                timeout=30,
+            )
+    except asyncio.TimeoutError:
+        app_state.logger.error("Search timed out for %s", signals.search_term)
+        error = (
+            "Search timed out after 30 seconds. Check your connection and try again."
         )
-        yield SSE.redirect("/downloads")
-        signals.song_url = signals.search_term
-        async for update in gen_download(signals):
-            yield update
+    except Exception as exception:  # pylint: disable=broad-exception-caught
+        app_state.logger.exception("Search failed for %s", signals.search_term)
+        error = f"Search failed: {exception}"
 
-    songs = get_search_results(signals.search_term)
     yield SSE.patch_elements(
         templates.get_template("search-list.html.j2").render(
-            songs=songs,
+            suggestions=suggestions, preview=preview, error=error
         )
     )
 
@@ -323,10 +340,9 @@ async def gen_download(signals: Signals):
     app_state.logger.info(
         f"[{signals.client_id}] Download requested: {signals.song_url}"
     )
-    yield SSE.patch_elements(f"""
-            <button id="download-{signals.song_url}" class="btn btn-primary btn-square loading">
-                </button>
-        """)
+    yield SSE.patch_elements(
+        '<div id="download-status" role="status">Preparing download...</div>'
+    )
 
     # Use the server's output setting, clients can't choose where files go
     if app_state.web_settings.get("web_use_output_dir", False):
@@ -337,25 +353,65 @@ async def gen_download(signals: Signals):
         )
 
     try:
-        # Fetch song metadata
-        song = Song.from_url(signals.song_url)
-        app_state.logger.info(f"Downloading song: {song}")
+        settings = client.downloader.settings
+        songs = await asyncio.to_thread(
+            get_simple_songs,
+            [signals.song_url],
+            use_ytm_data=settings["ytm_data"],
+            playlist_numbering=settings["playlist_numbering"],
+            albums_to_ignore=settings["ignore_albums"],
+            album_type=settings["album_type"],
+            playlist_retain_track_cover=settings["playlist_retain_track_cover"],
+        )
+        app_state.logger.info("Downloading %d song(s)", len(songs))
 
-        # Download Song
-        _, path = await client.downloader.pool_download(song)
-        yield SSE.patch_elements(f"""
-            <button id="download-{signals.song_url}" class="btn btn-primary btn-square">
-                    <iconify-icon icon="clarity:check-line" style="font-size: 24px"></iconify-icon>
-                </button>
-        """)
+        if not songs:
+            app_state.logger.warning("No tracks found for %s", signals.song_url)
+            yield SSE.patch_elements(
+                '<div id="download-status" role="status">No tracks found for this Spotify URL.</div>'
+            )
+            return
 
-        if path is None:
-            app_state.logger.error(f"Failure downloading {song.name}")
+        yield SSE.patch_elements(
+            f'<div id="download-status" role="status">Downloading {len(songs)} track(s)...</div>'
+        )
+
+        downloads = [
+            asyncio.create_task(client.downloader.pool_download(song)) for song in songs
+        ]
+        failures = 0
+        for completed, download in enumerate(asyncio.as_completed(downloads), start=1):
+            try:
+                song, path = await download
+                if path is None:
+                    app_state.logger.error("Failure downloading %s", song.name)
+                    failures += 1
+            except Exception as exception:  # pylint: disable=broad-exception-caught
+                app_state.logger.error("Error downloading track: %s", exception)
+                failures += 1
+
+            yield SSE.patch_elements(
+                f'<div id="download-status" role="status">Processed {completed} of {len(songs)} tracks...</div>'
+            )
+
+        message = (
+            f"Finished with {failures} failed track(s)."
+            if failures
+            else "Download complete."
+        )
+        yield SSE.patch_elements(
+            f'<div id="download-status" role="status">{message}</div>'
+        )
 
         # return str(path.absolute())
 
     except Exception as exception:
         app_state.logger.error(f"Error downloading! {exception}")
+        yield SSE.patch_elements(f"""
+            <div id="download-status" class="alert alert-error" role="alert">
+                Could not process Spotify URL: {exception}
+            </div>
+        """)
 
 
 # COMPONENTS

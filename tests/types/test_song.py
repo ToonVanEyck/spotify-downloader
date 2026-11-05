@@ -139,6 +139,56 @@ def test_localized_song_url():
     assert song.song_id == "1t2qKa8K72IBC8yQlhD9bU"
 
 
+def test_list_from_search_term_respects_limit(monkeypatch):
+    items = [
+        {
+            "id": str(index),
+            "name": f"Track {index}",
+            "artists": [{"id": "artist-id", "name": "Artist"}],
+            "album": {
+                "id": "album-id",
+                "name": "Album",
+                "artists": [{"name": "Artist"}],
+                "images": [
+                    {
+                        "url": "https://example.com/cover.jpg",
+                        "width": 640,
+                        "height": 640,
+                    }
+                ],
+                "release_date": "2020-01-02",
+                "total_tracks": 12,
+                "album_type": "album",
+            },
+            "duration_ms": 90000,
+            "track_number": index + 1,
+            "disc_number": 1,
+            "explicit": False,
+            "external_urls": {"spotify": f"https://open.spotify.com/track/{index}"},
+        }
+        for index in range(3)
+    ]
+    monkeypatch.setattr(
+        Song,
+        "search",
+        lambda _: {"tracks": {"items": items}},
+    )
+    monkeypatch.setattr(
+        Song,
+        "from_url",
+        lambda _: pytest.fail("Search results should not fetch full track metadata"),
+    )
+
+    songs = Song.list_from_search_term("query", limit=2)
+
+    assert len(songs) == 2
+    assert songs[0].name == "Track 0"
+    assert songs[0].artists == ["Artist"]
+    assert songs[0].album_name == "Album"
+    assert songs[0].cover_url == "https://example.com/cover.jpg"
+    assert songs[0].url == "https://open.spotify.com/track/0"
+
+
 # @pytest.mark.vcr()
 # def test_song_from_search_term():
 #     """
@@ -171,8 +221,7 @@ def test_song_from_data_dump():
     """
 
     # Loads from str
-    song = Song.from_data_dump(
-        """
+    song = Song.from_data_dump("""
         {
             "name": "Ropes",
             "artists": ["Dirty Palm", "Chandler Jewels"],
@@ -199,8 +248,7 @@ def test_song_from_data_dump():
             "url": "https://open.spotify.com/track/1t2qKa8K72IBC8yQlhD9bU",
             "popularity": 0
         }
-        """
-    )
+        """)
 
     assert song.name == "Ropes"
     assert song.artists == ["Dirty Palm", "Chandler Jewels"]

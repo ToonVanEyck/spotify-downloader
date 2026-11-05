@@ -1,72 +1,59 @@
-<div id="search-list" data-signals="{'song_url': {}}">
-    <script>
-        function download(client_id, song) {
-            console.log("Downloading song:", song);
-
-            params = {
-                client_id: client_id,
-                url: song
-            };
-            const queryString = new URLSearchParams(params).toString();
-            fetch(`/api/download/url?${queryString}`, {
-                method: 'POST'
-            }).then(response => {
-                if (response.ok) {
-                    console.log("Download started");
-                } else {
-                    console.error("Failed to start download");
-                }
-            }).catch(error => {
-                console.error("Error:", error);
-            });
-        }
-    </script>
-    {% for song in songs %}
-    <div key="{{loop.index0}}" class="card md:card-side card-bordered m-2 shadow-lg card-compact bg-base-100">
-        <figure class="aspect-square md:max-h-fit">
-            <img src="{{ song.cover_url }}" class="object-contain aspect-square md:max-h-44" />
+<div id="search-list" data-signals='{"song_url": ""}'>
+    {% macro render_item(item) %}
+    <article class="card md:card-side card-bordered card-compact bg-base-100 shadow-sm">
+        <figure class="aspect-square md:w-40">
+            {% if item.cover_url %}
+            <img src="{{ item.cover_url }}" alt="Cover for {{ item.name }}" class="aspect-square object-cover" />
+            {% else %}
+            <div class="flex aspect-square items-center justify-center bg-base-200 md:w-40">
+                <iconify-icon icon="clarity:music-note-line" style="font-size: 32px"></iconify-icon>
+            </div>
+            {% endif %}
         </figure>
         <div class="card-body">
-            <h2 class="card-title">
-                {{ song.name }}
-                {% if song.explicit %}
-                <div class="badge mx-0.5 badge-error">
-                    Explicit
-                </div>
-                {% endif %}
-            </h2>
-            <h3>
-                {% for artist in song.artists %}
-                {% if not loop.first %}
-                &#8226;
-                {% endif %}
-                {{ artist }}
-                {% endfor %}
-            </h3>
-            <h3>
-                {{ song.album_name }}
-            </h3>
-            <div class="card-actions absolute bottom-0 right-0 m-2">
-                <a class="btn btn-ghost btn-square" href="{{ song.url }}" target="_blank">
-                    <!-- Spotify -->
+            <span class="badge badge-outline w-fit">{{ item.kind }}</span>
+            <h3 class="card-title">{{ item.name }}</h3>
+            {% if item.subtitle %}
+            <p>{{ item.subtitle }}</p>
+            {% endif %}
+            <div class="card-actions mt-auto justify-end">
+                <a class="btn btn-ghost btn-square" href="{{ item.url }}" target="_blank" rel="noopener noreferrer" title="Open on Spotify">
                     <iconify-icon icon="clarity:link-line" style="font-size: 24px"></iconify-icon>
                 </a>
-
-                {% if false %}
-                <button class="btn btn-primary btn-square">
-                    <!-- in queue -->
-                    <iconify-icon icon="clarity:check-line" style="font-size: 24px"></iconify-icon>
+                <button class="btn btn-primary" data-on-click="$song_url = {{ item.url|tojson|forceescape }}; @post('/client/download/')">
+                    <iconify-icon icon="clarity:download-line" style="font-size: 20px"></iconify-icon>
+                    Download
                 </button>
-                {% else %}
-                <button id="download-{{song.url}}" class="btn btn-primary btn-square"
-                    data-on-click="$song_url = '{{song.url}}'; @post('/client/download/'); ">
-                    {# download($client_id, '{{song.url}}') #}
-                    <!-- download -->
-                    <iconify-icon icon="clarity:floppy-line" style="font-size: 24px"></iconify-icon>
-                </button>
-                {% endif %}
             </div>
         </div>
+    </article>
+    {% endmacro %}
+
+    {% if error %}
+    <div class="alert alert-error m-2" role="alert">
+        {{ error }}
     </div>
+    {% endif %}
+
+    {% if preview %}
+    <section class="mb-6" aria-labelledby="search-preview-title">
+        <h2 id="search-preview-title" class="mb-3 text-xl font-semibold">Spotify link</h2>
+        {{ render_item(preview) }}
+    </section>
+    {% endif %}
+
+    {% for category, title in [("artists", "Artists"), ("tracks", "Tracks"), ("albums", "Albums"), ("playlists", "Playlists")] %}
+    {% if suggestions and suggestions[category] %}
+    <section class="mb-6" aria-labelledby="search-{{ category }}-title">
+        <h2 id="search-{{ category }}-title" class="mb-3 text-xl font-semibold">{{ title }}</h2>
+        <div class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {% for item in suggestions[category] %}
+            {{ render_item(item) }}
+            {% endfor %}
+        </div>
+    </section>
+    {% endif %}
     {% endfor %}
+
+    <div id="download-status" role="status" aria-live="polite"></div>
 </div>

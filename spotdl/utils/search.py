@@ -10,9 +10,13 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import requests
+from rapidfuzz import fuzz
+from spotapi import Song as SpotifySearchSong
+from spotapi import client_pool
 from ytmusicapi import YTMusic
 
 from spotdl.types.album import Album
@@ -26,6 +30,8 @@ from spotdl.utils.spotify import SpotifyClient, SpotifyError
 __all__ = [
     "QueryError",
     "get_search_results",
+    "get_search_suggestions",
+    "get_spotify_url_preview",
     "parse_query",
     "get_simple_songs",
     "reinit_song",
@@ -39,6 +45,7 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 client = None  # pylint: disable=invalid-name
+SEARCH_RELEVANCE_THRESHOLD = 65.0
 
 
 def get_ytm_client() -> YTMusic:
@@ -62,18 +69,227 @@ class QueryError(Exception):
     """
 
 
-def get_search_results(search_term: str) -> List[Song]:
+def get_search_results(search_term: str, limit: Optional[int] = None) -> List[Song]:
     """
     Creates a list of Song objects from a search term.
 
     ### Arguments
     - search_term: the search term to use
+    - limit: the maximum number of songs to return, or None for no limit
 
     ### Returns
     - a list of Song objects
     """
 
-    return Song.list_from_search_term(search_term)
+    return Song.list_from_search_term(search_term, limit=limit)
+
+
+def _search_card(
+    kind: str, data: Dict[str, Any], name: str, subtitle: str, image_url: Optional[str]
+) -> Dict[str, Optional[str]]:
+    uri = data.get("uri", "")
+    uri_parts = uri.split(":")
+    url = (
+        f"https://open.spotify.com/{uri_parts[1]}/{uri_parts[2]}"
+        if len(uri_parts) == 3 and uri_parts[0] == "spotify"
+        else uri
+    )
+    return {
+        "kind": kind,
+        "name": name,
+        "subtitle": subtitle,
+        "cover_url": image_url,
+        "url": url,
+    }
+
+
+def _largest_image_url(images: List[Dict[str, Any]]) -> Optional[str]:
+    if not images:
+        return None
+    image = max(
+        images,
+        key=lambda item: (item.get("width") or 0) * (item.get("height") or 0),
+    )
+    return image.get("url")
+
+
+def _relevance_score(search_term: str, item: Dict[str, Optional[str]]) -> float:
+    candidates = [item["name"] or ""]
+    if item["kind"] != "Artist" and item["subtitle"]:
+        candidates.append(item["subtitle"])
+        candidates.append(f"{item['name']} {item['subtitle']}")
+    return max(fuzz.WRatio(search_term, candidate) for candidate in candidates)
+
+
+def get_search_suggestions(
+    search_term: str, limit: int = 10
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Search Spotify once and return artist, track, and album suggestions."""
+
+    if not search_term.strip():
+        return {"artists": [], "tracks": [], "albums": [], "playlists": []}
+
+    spotify_session = client_pool.get()
+    original_request = spotify_session.request
+    previous_request = getattr(spotify_session, "__dict__", {}).get("request")
+    original_retries = spotify_session.auto_retries
+
+    def request_with_timeout(method, url, **kwargs):
+        kwargs.setdefault("timeout", 5)
+        return original_request(method, url, **kwargs)
+
+    spotify_session.request = request_with_timeout
+    spotify_session.auto_retries = 1
+    try:
+        result = SpotifySearchSong(client=spotify_session).query_songs(
+            search_term, limit=limit * 3
+        )
+    except Exception:
+        spotify_session.close()
+        raise
+    finally:
+        if previous_request is None:
+            del spotify_session.request
+        else:
+            spotify_session.request = previous_request
+        spotify_session.auto_retries = original_retries
+        if "result" in locals():
+            client_pool.put(spotify_session)
+
+    search_results = result.get("data", {}).get("searchV2", {})
+    suggestions: Dict[str, List[Dict[str, Any]]] = {
+        "artists": [],
+        "tracks": [],
+        "albums": [],
+        "playlists": [],
+    }
+
+    for wrapper in search_results.get("artists", {}).get("items", [])[:limit]:
+        artist = wrapper.get("data", {})
+        profile = artist.get("profile", {})
+        sources = artist.get("visuals", {}).get("avatarImage", {}).get("sources", [])
+        suggestions["artists"].append(
+            _search_card(
+                "Artist",
+                artist,
+                profile.get("name", ""),
+                "Artist",
+                _largest_image_url(sources),
+            )
+        )
+
+    for wrapper in search_results.get("tracksV2", {}).get("items", [])[:limit]:
+        track = wrapper.get("item", {}).get("data", {})
+        artists = track.get("artists", {}).get("items", [])
+        artist_names = [artist.get("profile", {}).get("name", "") for artist in artists]
+        album = track.get("albumOfTrack", {})
+        sources = album.get("coverArt", {}).get("sources", [])
+        suggestions["tracks"].append(
+            _search_card(
+                "Track",
+                track,
+                track.get("name", ""),
+                " • ".join(artist_names),
+                _largest_image_url(sources),
+            )
+        )
+
+    for wrapper in search_results.get("albumsV2", {}).get("items", [])[:limit]:
+        album = wrapper.get("data", {})
+        artists = album.get("artists", {}).get("items", [])
+        artist_names = [artist.get("profile", {}).get("name", "") for artist in artists]
+        sources = album.get("coverArt", {}).get("sources", [])
+        suggestions["albums"].append(
+            _search_card(
+                "Album",
+                album,
+                album.get("name", ""),
+                " • ".join(artist_names),
+                _largest_image_url(sources),
+            )
+        )
+
+    for wrapper in search_results.get("playlists", {}).get("items", [])[:limit]:
+        playlist = wrapper.get("data", {})
+        owner = playlist.get("ownerV2", {}).get("data", {}).get("name", "")
+        images = playlist.get("images", {})
+        image_items = images.get("items", []) if isinstance(images, dict) else images
+        image_sources = [
+            source for image in image_items for source in image.get("sources", [])
+        ]
+        suggestions["playlists"].append(
+            _search_card(
+                "Playlist",
+                playlist,
+                playlist.get("name", ""),
+                owner or "Public playlist",
+                _largest_image_url(image_sources),
+            )
+        )
+
+    for category, items in suggestions.items():
+        ranked = []
+        for item in items:
+            score = _relevance_score(search_term, item)
+            if score >= SEARCH_RELEVANCE_THRESHOLD:
+                ranked.append((score, item))
+        ranked.sort(key=lambda result_item: result_item[0], reverse=True)
+        suggestions[category] = [item for _, item in ranked[:limit]]
+
+    return suggestions
+
+
+def get_spotify_url_preview(url: str) -> Dict[str, Any]:
+    """Fetch display metadata for a Spotify item without starting a download."""
+
+    normalized_url = re.sub(r"/intl-\w+\/", "/", url)
+    parsed_url = urlparse(normalized_url)
+    path_parts = parsed_url.path.strip("/").split("/")
+    if (
+        parsed_url.hostname != "open.spotify.com"
+        or len(path_parts) < 2
+        or path_parts[0] not in {"track", "album", "playlist", "artist"}
+    ):
+        raise ValueError(f"Unsupported Spotify URL: {url}")
+
+    kind, item_id = path_parts[0], path_parts[1]
+    normalized_url = f"https://open.spotify.com/{kind}/{item_id}"
+    if kind == "track":
+        song = Song.from_url(normalized_url)
+        return {
+            "kind": "Track",
+            "name": song.name,
+            "subtitle": " • ".join(song.artists),
+            "cover_url": song.cover_url,
+            "url": normalized_url,
+        }
+
+    spotify_client = SpotifyClient()
+    metadata = getattr(spotify_client, kind)(normalized_url)
+    if metadata is None:
+        raise ValueError(f"No Spotify {kind} found for URL: {url}")
+
+    images = metadata.get("images") or []
+    subtitle = kind.title()
+    if kind == "album":
+        artists = [artist.get("name", "") for artist in metadata.get("artists", [])]
+        subtitle = " • ".join(artists)
+    elif kind == "playlist":
+        owner = metadata.get("owner", {}).get("display_name")
+        track_count = metadata.get("tracks", {}).get("total")
+        subtitle = "Playlist"
+        if owner:
+            subtitle += f" • {owner}"
+        if track_count is not None:
+            subtitle += f" • {track_count} tracks"
+
+    return {
+        "kind": kind.title(),
+        "name": metadata.get("name", ""),
+        "subtitle": subtitle,
+        "cover_url": _largest_image_url(images),
+        "url": normalized_url,
+    }
 
 
 def parse_query(
