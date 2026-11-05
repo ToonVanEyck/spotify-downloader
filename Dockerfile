@@ -61,3 +61,4 @@ RUN uv run --project /app --no-dev --frozen --no-sync spotdl --download-deno
 
 # Entrypoint command
 ENTRYPOINT ["uv", "run", "--project", "/app", "--no-dev", "--frozen", "--no-sync", "spotdl"]
+CMD ["web", "--host", "0.0.0.0", "--port", "8800", "--web-use-output-dir"]

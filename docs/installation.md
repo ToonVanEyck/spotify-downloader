@@ -153,30 +153,22 @@ docker compose cp spotdl:/music/. ./downloads/
 
 ### Unraid Web UI
 
-The repository includes `docker-compose.unraid.yml`, which pulls the web image
-from GitHub Container Registry, binds it to the container network, and saves
-downloads to a host directory. The `Publish Unraid Container` GitHub Actions
-workflow publishes `ghcr.io/toonvaneyck/spotify-downloader:latest` whenever
-`master` is updated. After its first successful run, set the GHCR package
-visibility to **Public** in the package settings if Unraid will pull without
-registry credentials.
+The `Publish Unraid Container` GitHub Actions workflow publishes
+`ghcr.io/toonvaneyck/spotify-downloader:latest` whenever `master` is updated.
+After the first successful run, set the GHCR package visibility to **Public** in
+the package settings if Unraid will pull without registry credentials.
 
-On Unraid, set the download path and port, then pull and start the image:
+In Unraid, add a container with these settings:
 
-```bash
-export SPOTDL_DOWNLOAD_DIR=/mnt/user/music/spotdl
-export SPOTDL_WEB_PORT=8800
-docker compose -f docker-compose.unraid.yml pull
-docker compose -f docker-compose.unraid.yml up -d
-```
+- Repository: `ghcr.io/toonvaneyck/spotify-downloader:latest`
+- Network type: `Bridge`
+- Port mapping: host `8800` to container `8800` over TCP
+- Path mapping: your music directory to container path `/music`
+- Post Arguments: leave blank; the image starts the web server by default
 
-Open `http://<unraid-ip>:8800` in a browser. The mapped download directory must
-be writable by UID `99` and GID `100` (the standard Unraid `nobody:users` IDs).
-To stop the container, run:
-
-```bash
-docker compose -f docker-compose.unraid.yml down
-```
+The container runs as UID `99` and GID `100` (Unraid's standard `nobody:users`
+IDs), so ensure the mapped music directory is writable by them. Open
+`http://<unraid-ip>:8800` to use the web UI.
 
 ## Other Installation Methods
 
