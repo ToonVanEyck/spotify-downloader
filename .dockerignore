@@ -4,3 +4,16 @@
 docs
 scripts
 tests
+.venv
+venv
+env
+__pycache__
+*.py[cod]
+downloads
+*.mp3
+*.m4a
+*.wav
+*.flac
+*.ogg
+*.opus
+*.lrc

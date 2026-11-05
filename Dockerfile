@@ -26,9 +26,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install uv and update pip/wheel
 RUN pip install --no-cache-dir --upgrade pip uv wheel spotipy
 
-# Create spotdl user and group
-RUN groupadd -g $GID spotdl && \
-    useradd -m -u $UID -g $GID spotdl
+# Create spotdl user and group. Unraid commonly uses an existing GID (100),
+# so allow the container group and user to share those IDs.
+RUN groupadd --force --non-unique --gid "$GID" spotdl && \
+    useradd --non-unique --create-home --uid "$UID" --gid spotdl spotdl
 
 # Set workdir
 WORKDIR /app
@@ -47,6 +48,7 @@ RUN mkdir -p /music && chown spotdl:spotdl /music
 
 # Create a volume for the output directory
 VOLUME /music
+EXPOSE 8800
 
 # Change Workdir to download location
 WORKDIR /music
