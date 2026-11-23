@@ -3,7 +3,9 @@ Module for logging
 """
 
 import logging
-from typing import Optional
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Callable, Iterator, Optional
 
 from rich import get_console
 from rich.console import ConsoleRenderable
@@ -27,6 +29,8 @@ __all__ = [
     "SpotdlFormatter",
     "LEVEL_TO_NAME",
     "NAME_TO_LEVEL",
+    "capture_web_output",
+    "web_log_output",
 ]
 
 # https://github.com/python/cpython/blob/3.10/Lib/logging/__init__.py
@@ -61,6 +65,39 @@ NAME_TO_LEVEL = {
     "DEBUG": DEBUG,
     "NOTSET": NOTSET,
 }
+
+web_log_output: ContextVar[Optional[Callable[[str], None]]] = ContextVar(
+    "web_log_output", default=None
+)
+
+
+class WebLogHandler(logging.Handler):
+    """Forward records only to the browser session that started the work."""
+
+    def __init__(self, output: Callable[[str], None]):
+        super().__init__()
+        self.output = output
+        self.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if web_log_output.get() is self.output:
+            self.output(self.format(record))
+
+
+@contextmanager
+def capture_web_output(output: Callable[[str], None]) -> Iterator[None]:
+    """Capture download logs without redirecting process-wide stdout/stderr."""
+
+    handler = WebLogHandler(output)
+    spotdl_logger = logging.getLogger("spotdl")
+    token = web_log_output.set(output)
+    spotdl_logger.addHandler(handler)
+    try:
+        yield
+    finally:
+        spotdl_logger.removeHandler(handler)
+        web_log_output.reset(token)
+
 
 THEME = Theme(
     {

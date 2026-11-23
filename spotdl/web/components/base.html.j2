@@ -37,13 +37,28 @@
     function goto(location) {
         window.location.href = location;
     }
+
+    function followDownloadOutput(element) {
+        let following = true;
+        element.addEventListener('scroll', () => {
+            following = element.scrollHeight - element.scrollTop - element.clientHeight < 48;
+        });
+        new MutationObserver(() => {
+            if (following) element.scrollTop = element.scrollHeight;
+        }).observe(element, {childList: true, subtree: true, characterData: true});
+    }
 </script>
 
 <body class="min-h-screen" data-signals="{'client_id': ''}"
-    data-on-load="$client_id = localStorage.getItem('client_id'); @get('/client/load')" data-theme="forest">
+    data-on-load="$client_id = sessionStorage.getItem('client_id') || ''; @get('/client/load')" data-theme="forest">
 
     <div class="flex min-h-screen flex-col bg-base-300">
         {% include "navbar.html.j2" %}
+
+        <nav class="tabs tabs-border border-b border-base-content/10 px-4 sm:px-6" aria-label="Download modes">
+            <a href="/" class="tab {% if not request or not request.url.path.startswith('/radio') %}tab-active{% endif %}">Downloads</a>
+            <a href="/radio" class="tab {% if request and request.url.path.startswith('/radio') %}tab-active{% endif %}">Radio monitor</a>
+        </nav>
 
         <!-- Content -->
         <main class="flex-1">
@@ -58,12 +73,9 @@
         <pre data-json-signals></pre> #}
 
 
-        <!-- Footer -->
-        {% include "footer.html.j2" %}
-
         <!-- Settings -->
         <span id="component-settings"
-            data-on-signal-patch="@get('/client/component/settings-content'); localStorage.setItem('client_id', $client_id);"
+            data-on-signal-patch="@get('/client/component/settings-content'); sessionStorage.setItem('client_id', $client_id);"
             data-on-signal-patch-filter="{include: /client_id/}">
         </span>
         <dialog id="settings_modal" class="modal">

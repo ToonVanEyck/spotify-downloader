@@ -10,7 +10,10 @@ import mimetypes
 import re
 import threading
 from argparse import Namespace
-from typing import Any, Dict, Optional, Union
+from collections import deque
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Dict, Optional, Union
 
 from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.staticfiles import StaticFiles
@@ -20,8 +23,17 @@ from uvicorn import Server
 from spotdl.download.downloader import Downloader
 from spotdl.download.progress_handler import ProgressHandler, SongTracker
 from spotdl.types.options import DownloaderOptions, WebOptions
+from spotdl.types.song import Song
 from spotdl.utils.arguments import create_parser
-from spotdl.utils.config import DOWNLOADER_OPTIONS, create_settings_type
+from spotdl.utils.config import (
+    DOWNLOADER_OPTIONS,
+    create_settings_type,
+    get_spotdl_path,
+)
+from spotdl.utils.navidrome import NavidromeError
+
+if TYPE_CHECKING:
+    from spotdl.utils.radio import RadioMonitor
 
 __all__ = [
     "ALLOWED_ORIGINS",
@@ -206,6 +218,23 @@ class SPAStaticFiles(StaticFiles):
         return response
 
 
+def get_web_download_output(settings: DownloaderOptions, use_output_dir: bool) -> str:
+    """Use one server-controlled, persistent destination for all web downloads."""
+
+    if use_output_dir:
+        return settings["output"]
+    return str((get_spotdl_path() / "web" / "downloads").absolute())
+
+
+@dataclass(frozen=True)
+class WebDownloadResult:
+    """Distinguish a library match from a failed download without a file."""
+
+    song: Song
+    path: Optional[Path] = None
+    already_collected: bool = False
+
+
 class Client:
     """
     Holds the client's state.
@@ -242,10 +271,62 @@ class Client:
 
         # self.websocket = websocket
         self.client_id = client_id
+        self.log_lines: deque[str] = deque(maxlen=1000)
+        self.log_lock = threading.Lock()
         # self.update_callback = update_callback
+        self.progress_handler = ProgressHandler(
+            simple_tui=True,
+            update_callback=self.song_update,
+            web_ui=True,
+        )
         self.downloader = self.create_downloader()
 
         self.disconnect_timer = None
+
+    def append_log(self, message: str) -> None:
+        """Store a bounded, thread-safe terminal transcript for this session."""
+
+        with self.log_lock:
+            for line in message.splitlines():
+                self.log_lines.append(line[:8000])
+
+    def get_log_output(self) -> str:
+        """Return a consistent snapshot while download workers write output."""
+
+        with self.log_lock:
+            return "\n".join(self.log_lines)
+
+    async def download_song(self, song: Song) -> WebDownloadResult:
+        """Check the shared Navidrome connection before starting any audio work."""
+
+        tracker = self.progress_handler.progress_tracker
+        tracker.update(song, 0, "Checking Navidrome")
+        try:
+            monitor = app_state.radio_monitor
+            if monitor is None:
+                raise NavidromeError("Navidrome configuration service is not running.")
+            connection = monitor.optional_navidrome()
+            if connection is None:
+                self.append_log(
+                    "WARNING Navidrome is not configured; library check skipped. "
+                    "Configure it on the Radio monitor page."
+                )
+            else:
+                self.append_log(f"{song.artist} - {song.name}: checking Navidrome...")
+                if await asyncio.to_thread(connection.contains, song.artist, song.name):
+                    tracker.update(song, 100, "Already collected")
+                    tracker.set_path(song, "")
+                    self.append_log(f"{song.artist} - {song.name}: already collected.")
+                    return WebDownloadResult(song, already_collected=True)
+            downloaded_song, path = await self.downloader.pool_download(song)
+            if path is None:
+                tracker.update(song, 100, "Error")
+            return WebDownloadResult(downloaded_song, path)
+        except Exception as exception:  # pylint: disable=broad-exception-caught
+            tracker.update(song, 100, "Error")
+            logger.exception("Web download failed for %s", song.name)
+            self.append_log(f"ERROR {song.artist} - {song.name}: {exception}")
+            raise
 
     def create_downloader(self) -> Downloader:
         """
@@ -257,11 +338,7 @@ class Client:
 
         downloader = Downloader(settings=self.downloader_settings, loop=app_state.loop)
 
-        downloader.progress_handler = ProgressHandler(
-            simple_tui=True,
-            update_callback=self.song_update,
-            web_ui=True,
-        )
+        downloader.progress_handler = self.progress_handler
 
         return downloader
 
@@ -405,6 +482,7 @@ class ApplicationState:
     downloader_settings: DownloaderOptions
     clients: Dict[str, Client] = {}
     logger: logging.Logger
+    radio_monitor: Optional["RadioMonitor"] = None
 
 
 app_state: ApplicationState = ApplicationState()

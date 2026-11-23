@@ -3,11 +3,12 @@ Module for handling API requests.
 """
 
 import argparse
+import asyncio
 import os
 import re
 import shutil
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
@@ -22,6 +23,7 @@ from spotdl.utils.arguments import create_parser
 from spotdl.utils.config import get_spotdl_path
 from spotdl.utils.ffmpeg import FFMPEG_FORMATS
 from spotdl.utils.github import RateLimitError, get_latest_version, get_status
+from spotdl.utils.logging import capture_web_output
 from spotdl.utils.search import get_search_results
 from spotdl.utils.web import (
     WEB_EDITABLE_SETTINGS,
@@ -30,6 +32,7 @@ from spotdl.utils.web import (
     app_state,
     get_client,
     get_current_state,
+    get_web_download_output,
 )
 
 __all__ = [
@@ -175,7 +178,7 @@ async def download_url(
     url: str,
     client: Client = Depends(get_client),
     state: ApplicationState = Depends(get_current_state),
-) -> Optional[str]:
+) -> str | dict[str, str]:
     """
     Download songs using Song url.
 
@@ -183,23 +186,24 @@ async def download_url(
     - url: The url to download.
 
     ### Returns
-    - returns the file path if the song was downloaded.
+    - returns the file path, or an explicit already-collected status.
     """
 
     # Use the server's output setting, clients can't choose where files go
-    if state.web_settings.get("web_use_output_dir", False):
-        client.downloader.settings["output"] = state.downloader_settings["output"]
-    else:
-        client.downloader.settings["output"] = str(
-            (get_spotdl_path() / f"web/sessions/{client.client_id}").absolute()
-        )
+    client.downloader.settings["output"] = get_web_download_output(
+        state.downloader_settings, state.web_settings.get("web_use_output_dir", False)
+    )
 
     try:
         # Fetch song metadata
-        song = Song.from_url(url)
+        song = await asyncio.to_thread(Song.from_url, url)
 
         # Download Song
-        _, path = await client.downloader.pool_download(song)
+        with capture_web_output(client.append_log):
+            result = await client.download_song(song)
+        if result.already_collected:
+            return {"status": "already collected", "song": result.song.name}
+        path = result.path
 
         if path is None:
             state.logger.error(f"Failure downloading {song.name}")
@@ -221,7 +225,7 @@ async def download_url(
 @router.get("/api/download/file")
 async def download_file(
     file: str,
-    client: Client = Depends(get_client),
+    client: Client = Depends(get_client),  # pylint: disable=unused-argument
     state: ApplicationState = Depends(get_current_state),
 ):
     """
@@ -243,7 +247,7 @@ async def download_file(
         if not output_prefix.endswith(("/", os.sep)):
             expected_dir = expected_dir.parent
     else:
-        expected_dir = get_spotdl_path() / f"web/sessions/{client.client_id}"
+        expected_dir = Path(get_web_download_output(state.downloader_settings, False))
 
     # Resolve both paths so ".." segments and symlinks can't escape the directory
     file_path = Path(file).resolve()

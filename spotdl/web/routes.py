@@ -3,7 +3,9 @@ Module which contains the web client routes and functions.
 """
 
 import asyncio
+import traceback
 import uuid
+from html import escape
 from pathlib import Path
 from typing import Any, Optional, cast
 
@@ -17,14 +19,19 @@ from fastapi.templating import Jinja2Templates
 
 from spotdl._version import __version__
 from spotdl.download.downloader import AUDIO_PROVIDERS, LYRICS_PROVIDERS
-from spotdl.utils.config import get_spotdl_path
 from spotdl.utils.ffmpeg import FFMPEG_FORMATS
+from spotdl.utils.logging import capture_web_output
 from spotdl.utils.search import (
     get_search_suggestions,
     get_simple_songs,
     get_spotify_url_preview,
 )
-from spotdl.utils.web import Client, app_state, validate_search_term
+from spotdl.utils.web import (
+    Client,
+    app_state,
+    get_web_download_output,
+    validate_search_term,
+)
 from spotdl.web.utils import Signals, datastar_response, handle_signals
 
 __all__ = ["router"]
@@ -130,11 +137,19 @@ async def handle_get_client_search(datastar_signals: ReadSignals):
     app_state.logger.info("Loading search...")
     signals = handle_signals(datastar_signals)
     app_state.logger.info(f"[{signals.client_id}] Search term: {signals.search_term}")
+    client = Client.get_instance(signals.client_id)
+    if client is not None:
+        client.append_log(f"INFO Searching Spotify: {signals.search_term}")
     is_valid_url = validate_search_term(signals.search_term)
 
     error = None
     preview = None
-    suggestions = {"artists": [], "tracks": [], "albums": []}
+    suggestions: dict[str, list[dict[str, Any]]] = {
+        "artists": [],
+        "tracks": [],
+        "albums": [],
+        "playlists": [],
+    }
     try:
         if is_valid_url:
             preview = await asyncio.wait_for(
@@ -148,15 +163,24 @@ async def handle_get_client_search(datastar_signals: ReadSignals):
                 ),
                 timeout=30,
             )
+        log_message = (
+            f"INFO Spotify preview loaded: {preview['name']}"
+            if preview is not None
+            else f"INFO Search complete: {sum(map(len, suggestions.values()))} results."
+        )
     except asyncio.TimeoutError:
         app_state.logger.error("Search timed out for %s", signals.search_term)
         error = (
             "Search timed out after 30 seconds. Check your connection and try again."
         )
+        log_message = f"ERROR {error}"
     except Exception as exception:  # pylint: disable=broad-exception-caught
         app_state.logger.exception("Search failed for %s", signals.search_term)
         error = f"Search failed: {exception}"
+        log_message = f"ERROR {error}\n{traceback.format_exc()}"
 
+    if client is not None:
+        client.append_log(log_message)
     yield SSE.patch_elements(
         templates.get_template("search-list.html.j2").render(
             suggestions=suggestions, preview=preview, error=error
@@ -182,6 +206,7 @@ async def handle_get_client_downloads(datastar_signals: ReadSignals):
             templates.get_template("status-disconnected.html.j2").render()
         )
         return
+    last_output = None
     while True:
         client_song_downloads = (
             client.downloader.progress_handler.progress_tracker.songs
@@ -191,6 +216,12 @@ async def handle_get_client_downloads(datastar_signals: ReadSignals):
                 client_song_downloads=client_song_downloads.values()
             )
         )
+        output = client.get_log_output()
+        if output != last_output:
+            yield SSE.patch_elements(
+                templates.get_template("download-output.html.j2").render(output=output)
+            )
+            last_output = output
         await asyncio.sleep(1)
 
 
@@ -315,8 +346,15 @@ async def handle_post_client_download(datastar_signals: ReadSignals):
     Handle the download request from the client.
     """
     signals = handle_signals(datastar_signals)
-    async for update in gen_download(signals):
-        yield update
+    client = Client.get_instance(signals.client_id)
+    if client is None:
+        yield SSE.patch_elements(
+            templates.get_template("status-disconnected.html.j2").render()
+        )
+        return
+    with capture_web_output(client.append_log):
+        async for update in gen_download(signals):
+            yield update
 
 
 # HELPERS
@@ -338,17 +376,16 @@ async def gen_download(signals: Signals):
     app_state.logger.info(
         f"[{signals.client_id}] Download requested: {signals.song_url}"
     )
+    client.append_log(f"$ spotdl download {signals.song_url}")
     yield SSE.patch_elements(
         '<div id="download-status" role="status">Preparing download...</div>'
     )
 
     # Use the server's output setting, clients can't choose where files go
-    if app_state.web_settings.get("web_use_output_dir", False):
-        client.downloader.settings["output"] = app_state.downloader_settings["output"]
-    else:
-        client.downloader.settings["output"] = str(
-            (get_spotdl_path() / f"web/sessions/{client.client_id}").absolute()
-        )
+    client.downloader.settings["output"] = get_web_download_output(
+        app_state.downloader_settings,
+        app_state.web_settings.get("web_use_output_dir", False),
+    )
 
     try:
         settings = client.downloader.settings
@@ -365,8 +402,10 @@ async def gen_download(signals: Signals):
 
         if not songs:
             app_state.logger.warning("No tracks found for %s", signals.song_url)
+            client.append_log("WARNING No tracks found for this Spotify URL.")
             yield SSE.patch_elements(
-                '<div id="download-status" role="status">No tracks found for this Spotify URL.</div>'
+                '<div id="download-status" role="status">'
+                "No tracks found for this Spotify URL.</div>"
             )
             return
 
@@ -374,22 +413,30 @@ async def gen_download(signals: Signals):
             f'<div id="download-status" role="status">Downloading {len(songs)} track(s)...</div>'
         )
 
-        downloads = [
-            asyncio.create_task(client.downloader.pool_download(song)) for song in songs
+        download_tasks = [
+            asyncio.create_task(client.download_song(song)) for song in songs
         ]
         failures = 0
-        for completed, download in enumerate(asyncio.as_completed(downloads), start=1):
+        collected = 0
+        for completed, download in enumerate(
+            asyncio.as_completed(download_tasks), start=1
+        ):
             try:
-                song, path = await download
-                if path is None:
-                    app_state.logger.error("Failure downloading %s", song.name)
+                result = await download
+                if result.already_collected:
+                    collected += 1
+                elif result.path is None:
+                    app_state.logger.error("Failure downloading %s", result.song.name)
+                    client.append_log(f"ERROR Failure downloading {result.song.name}")
                     failures += 1
             except Exception as exception:  # pylint: disable=broad-exception-caught
                 app_state.logger.error("Error downloading track: %s", exception)
+                client.append_log(f"ERROR Error downloading track: {exception}")
                 failures += 1
 
             yield SSE.patch_elements(
-                f'<div id="download-status" role="status">Processed {completed} of {len(songs)} tracks...</div>'
+                '<div id="download-status" role="status">'
+                f"Processed {completed} of {len(songs)} tracks...</div>"
             )
 
         message = (
@@ -397,17 +444,21 @@ async def gen_download(signals: Signals):
             if failures
             else "Download complete."
         )
+        if collected:
+            message += f" {collected} already collected."
         yield SSE.patch_elements(
             f'<div id="download-status" role="status">{message}</div>'
         )
+        client.append_log(message)
 
         # return str(path.absolute())
 
     except Exception as exception:
         app_state.logger.error(f"Error downloading! {exception}")
+        client.append_log(f"ERROR Could not process Spotify URL: {exception}")
         yield SSE.patch_elements(f"""
             <div id="download-status" class="alert alert-error" role="alert">
-                Could not process Spotify URL: {exception}
+                Could not process Spotify URL: {escape(str(exception))}
             </div>
         """)
 

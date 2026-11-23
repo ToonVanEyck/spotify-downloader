@@ -7,8 +7,16 @@ from spotdl.web import routes
 from spotdl.web.utils import datastar_response
 
 
-async def call_asgi(app, path, query_string=b""):
-    """Make a GET request to an ASGI app, return the status, headers and body"""
+async def call_asgi(
+    app,
+    path,
+    query_string=b"",
+    *,
+    method="GET",
+    request_body=b"",
+    request_headers=(),
+):
+    """Make an ASGI request and return the status, headers and body."""
 
     messages = []
     request_sent = False
@@ -17,7 +25,7 @@ async def call_asgi(app, path, query_string=b""):
         nonlocal request_sent
         if not request_sent:
             request_sent = True
-            return {"type": "http.request", "body": b"", "more_body": False}
+            return {"type": "http.request", "body": request_body, "more_body": False}
 
         # Keep the connection open until the response is done
         await asyncio.sleep(3600)
@@ -29,13 +37,13 @@ async def call_asgi(app, path, query_string=b""):
         "type": "http",
         "asgi": {"version": "3.0"},
         "http_version": "1.1",
-        "method": "GET",
+        "method": method,
         "scheme": "http",
         "path": path,
         "raw_path": path.encode(),
         "query_string": query_string,
         "root_path": "",
-        "headers": [],
+        "headers": list(request_headers),
         "client": ("127.0.0.1", 12345),
         "server": ("127.0.0.1", 8800),
     }

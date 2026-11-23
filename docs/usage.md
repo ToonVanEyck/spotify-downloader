@@ -228,10 +228,113 @@ To start the web UI, run
 spotdl web
 ```
 
+The downloads panel shows downloads from the current browser-tab session, including
+completed and failed tracks, rather than a history from previous browser sessions.
+Reloading or searching in the same tab keeps the session while it remains connected.
+
+The **Terminal output** panel displays search activity and live spotDL and yt-dlp
+messages, warnings, and errors for that session. Search failures include their
+tracebacks. It retains the latest 1,000 lines. Scroll up to inspect earlier output;
+scroll back to the bottom to resume following new output.
+
 ### Download Location
 
-By default, the web UI downloads files to a special directory, to overwrite this behavior
-add option `--web-use-output-dir`, which will make output directory follow `--output`
+Regular and radio web downloads share a persistent `web/downloads` directory
+under the spotDL configuration directory. Browser sessions still have separate
+download lists and terminal output; files are no longer stored in per-tab
+session directories. Existing files in old locations are not moved automatically.
+To use the server's `--output` setting instead, add `--web-use-output-dir`.
+
+Regular web downloads also use the Navidrome connection saved on the **Radio
+monitor** page, even if no stations are selected. Each song is checked before
+downloading; matches show **Already collected** instead of a download link.
+Library/authentication errors fail the track and appear in the terminal without
+starting a download. If Navidrome has never been configured, regular downloads
+still work and the terminal explicitly warns that the library check was skipped.
+The `/api/download/url` endpoint returns
+`{"status": "already collected", "song": "..."}` for matches, and the usual file
+path for successful downloads.
+
+### Radio monitoring
+
+Open the **Radio monitor** tab to collect songs from the nine stations on
+[nuopderadio.be](https://nuopderadio.be/), plus **Willy** and **Willy Classic**
+through the Willy API. Select stations, enter your Navidrome
+server URL, username, and password, then choose **Test connection & save**.
+The account must be able to search the music library through the Subsonic API.
+Use HTTPS unless the connection stays inside a trusted local network.
+
+- The first successful fetch queues the existing history for Navidrome checks
+  and downloads missing songs. Subsequent checks run every 30 minutes per enabled
+  station. Songs previously marked **baseline** are also queued on server restart.
+- New timestamped plays are compared against persisted history. News and other
+  entries without an artist and song title are ignored.
+- Willy sources return the latest 30 plays. Their supplied YouTube links are
+  passed directly to yt-dlp for audio, using Spotify for metadata. If a play
+  has no YouTube link, the normal spotDL audio search is used.
+- Before downloading, spotDL searches Navidrome and compares both artist and
+  title, ignoring case, accents, and punctuation. Version names such as "Live"
+  remain significant. Matches are shown as **already collected**.
+- Successful radio downloads are also remembered locally to prevent duplicate
+  downloads across stations while Navidrome is waiting to scan its library.
+- Library errors block downloads rather than being treated as missing songs.
+  Source and download errors appear in the radio terminal and activity list.
+  Failed tracks are retried after the next source check, or using
+  **Check now / retry failed**.
+- Monitoring runs on the server, independent of browser sessions. Configuration,
+  history, and work survive restarts. Deselect all stations to pause; an
+  in-progress download may finish. Re-enabling a station resumes queued songs
+  and checks its current history.
+  History that has already disappeared from the source cannot be recovered after
+  downtime.
+
+Radio files use the same persistent `web/downloads` folder as regular web
+downloads by default, not a radio-specific or temporary session folder. To download directly
+to a local or mounted folder that Navidrome scans, start the server with:
+
+```bash
+spotdl web --keep-alive --web-use-output-dir --output /path/to/navidrome/music
+```
+
+The Navidrome connection checks its library and publishes playlists; it does not
+upload audio files or trigger a library scan. Configure Navidrome to scan the chosen output folder. The
+`--web-use-output-dir` option also applies to ordinary web downloads.
+
+#### Nightly Navidrome playlists
+
+At **03:00 Europe/Brussels** every day, the server publishes playlists for the
+preceding radio day (03:00 to 03:00, with daylight-saving adjustments):
+
+- **spotDL Radio - [station]** for each currently monitored station.
+- **spotDL Radio - Super Mix** combining all currently monitored stations.
+
+Playlists include songs from the persisted play history, not just the latest
+300 entries displayed on the page. Only songs found in Navidrome at publishing
+time are included; not-yet-indexed songs are skipped and logged. Schedule
+Navidrome library scans before 03:00 to include recent downloads.
+Duplicate broadcasts and songs shared across stations are removed by Navidrome
+song ID. The same playlists, owned by the configured account, are replaced in
+full every day, including clearing a playlist when no songs qualify. Reserve
+these names for the app; unrelated playlists are not changed. Paused stations'
+existing playlists are left untouched and excluded from subsequent Super Mixes.
+
+Publishing starts at the next 03:00 after monitoring is first enabled. The
+schedule survives restarts; a missed run publishes the latest completed radio
+day on startup, rather than replaying every missed day. Errors appear on the
+radio page and terminal and are retried every five minutes. Partial publishing
+is safe to retry without creating new daily copies. Deselecting all stations
+pauses publishing. The browser need not be open, but the server/container must
+be running. The account must have permission to create and modify playlists.
+The bundled timezone data keeps the schedule on Brussels time even when Docker
+uses UTC.
+
+Radio state is stored in `radio.sqlite3` in the spotDL configuration directory.
+The database is owner-readable/writable only on Unix, but contains the Navidrome
+password **unencrypted** for Subsonic authentication. Protect this directory and
+its backups. Saved passwords are never rendered into the page or live stream;
+leaving the password blank retains it only for the same server and username.
+Radio configuration is server-wide and the web UI is not an authentication
+boundary: keep it on localhost or behind trusted access controls.
 
 ## Config file
 

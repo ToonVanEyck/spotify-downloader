@@ -236,6 +236,47 @@ def test_get_search_suggestions_returns_all_categories(monkeypatch):
     )
 
 
+@pytest.mark.parametrize(
+    "visuals",
+    [None, {"avatarImage": None}, {"avatarImage": {"sources": None}}],
+)
+def test_search_artist_without_avatar(monkeypatch, mocker, visuals):
+    session = mocker.Mock(auto_retries=4)
+    search = mocker.Mock()
+    search.query_songs.return_value = {
+        "data": {
+            "searchV2": {
+                "artists": {
+                    "items": [
+                        {
+                            "data": {
+                                "uri": "spotify:artist:daft-punk",
+                                "profile": {"name": "Daft Punk"},
+                                "visuals": visuals,
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    monkeypatch.setattr(search_utils, "SpotifySearchSong", lambda client: search)
+    monkeypatch.setattr(search_utils.client_pool, "get", lambda: session)
+    monkeypatch.setattr(search_utils.client_pool, "put", lambda client: None)
+
+    suggestions = get_search_suggestions("daft punk")
+
+    assert suggestions["artists"] == [
+        {
+            "kind": "Artist",
+            "name": "Daft Punk",
+            "subtitle": "Artist",
+            "cover_url": None,
+            "url": "https://open.spotify.com/artist/daft-punk",
+        }
+    ]
+
+
 @pytest.mark.parametrize("kind", ["track", "album", "playlist", "artist"])
 def test_spotify_url_preview(monkeypatch, kind):
     class FakeSpotifyClient:

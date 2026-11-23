@@ -1,0 +1,103 @@
+<div id="radio-status" class="space-y-8">
+    <section aria-labelledby="radio-sources-heading">
+        <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
+            <h2 id="radio-sources-heading" class="text-lg font-semibold">Source status</h2>
+            <form action="/radio/check" method="post">
+                <button class="btn btn-outline btn-sm" type="submit">Check now / retry failed</button>
+            </form>
+        </div>
+        <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {% for station in stations %}
+            <article class="rounded-lg border border-base-content/15 bg-base-200 p-4">
+                <div class="flex items-center justify-between gap-2">
+                    <a class="link link-hover font-medium" href="{{ station.url|e }}"
+                        target="_blank" rel="noopener noreferrer">{{ station.name|e }}</a>
+                    <span class="badge badge-sm {% if station.enabled %}badge-primary{% else %}badge-ghost{% endif %}">
+                        {{ "Monitoring" if station.enabled else "Paused" }}
+                    </span>
+                </div>
+                <p class="mt-2 text-xs text-base-content/60">Last check: {{ station.checked|e }}</p>
+                {% if station.enabled %}
+                <p class="mt-1 text-xs text-base-content/60">Next check: {{ station.next_check|e }}</p>
+                {% endif %}
+                {% if station.error %}
+                <p class="mt-2 break-words text-xs text-error" role="alert">{{ station.error|e }}</p>
+                {% endif %}
+            </article>
+            {% endfor %}
+        </div>
+    </section>
+
+    <section aria-labelledby="radio-plays-heading">
+        <h2 id="radio-plays-heading" class="mb-3 text-lg font-semibold">Recent radio plays</h2>
+        <p class="mb-3 text-xs text-base-content/60">
+            Latest 300 plays. Initial history is included in library checks and downloads.
+            Failed tracks are retried on the next source check.
+            Only the history still visible on the source can be recovered after downtime.
+        </p>
+        <div class="max-h-96 overflow-auto rounded-lg border border-base-content/15">
+            <table class="table table-sm">
+                <thead class="sticky top-0 bg-base-200">
+                    <tr><th>Played (UTC)</th><th>Station</th><th>Song</th><th>Status</th></tr>
+                </thead>
+                <tbody>
+                    {% for play in plays %}
+                    <tr>
+                        <td class="whitespace-nowrap text-xs">{{ play.played_at[:16]|replace("T", " ")|e }}</td>
+                        <td>{{ play.station|e }}</td>
+                        <td class="min-w-52">
+                            <span class="font-medium">{{ play.artist|e }} - {{ play.title|e }}</span>
+                            {% if play.message %}<p class="mt-1 break-words text-xs text-error">{{ play.message|e }}</p>{% endif %}
+                            {% if play.path %}<p class="mt-1 break-all text-xs text-base-content/60">{{ play.path|e }}</p>{% endif %}
+                        </td>
+                        <td>
+                            <span class="badge badge-sm whitespace-nowrap {{ {'downloaded': 'badge-success', 'already collected': 'badge-info', 'failed': 'badge-error', 'downloading': 'badge-primary', 'checking': 'badge-warning'}.get(play.status, 'badge-ghost') }}">
+                                {{ play.status|e }}
+                            </span>
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr><td colspan="4" class="py-8 text-center text-base-content/60">
+                        Select stations and save your Navidrome connection to start monitoring.
+                    </td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <section aria-labelledby="radio-playlists-heading">
+        <h2 id="radio-playlists-heading" class="mb-3 text-lg font-semibold">Nightly Navidrome playlists</h2>
+        <div class="space-y-2 rounded-lg border border-base-content/15 bg-base-200 p-4 text-sm">
+            <p>Every day at <strong>03:00 Europe/Brussels</strong>, publish the previous 03:00-to-03:00 radio day.</p>
+            <p>One <strong>spotDL Radio - [station]</strong> playlist per monitored station and one
+                <strong>spotDL Radio - Super Mix</strong>. Duplicate songs are removed and existing playlists are replaced.</p>
+            <p class="text-xs text-base-content/65">Only songs already indexed by Navidrome can be included.
+                Publishing errors are retried every 5 minutes.</p>
+            {% if selected_stations %}
+            <p>Next scheduled run: {{ playlists.next_check|e }}</p>
+            {% else %}
+            <p>Paused &mdash; select stations to enable nightly publishing.</p>
+            {% endif %}
+            {% if playlists.last_run %}
+            <p>Last published radio day ended: {{ playlists.last_run|e }}</p>
+            {% endif %}
+            {% if playlists.error %}
+            <p class="break-words text-error" role="alert">{{ playlists.error|e }}</p>
+            {% endif %}
+        </div>
+    </section>
+
+    <section aria-labelledby="radio-output-heading">
+        <h2 id="radio-output-heading" class="mb-3 text-lg font-semibold">Radio terminal output</h2>
+        <div class="overflow-hidden rounded-lg border border-base-content/20 bg-neutral text-neutral-content">
+            <div class="border-b border-neutral-content/15 px-4 py-2 font-mono text-xs">
+                radio monitor / spotdl / yt-dlp &middot; last 1,000 lines
+            </div>
+            <div class="h-72 overflow-auto p-4 font-mono text-xs leading-relaxed"
+                data-on-load="followDownloadOutput(el)">
+                <pre id="radio-output" class="m-0 whitespace-pre-wrap break-words">{{ output|default("Radio activity and download errors will appear here.", true)|e }}</pre>
+            </div>
+        </div>
+    </section>
+</div>

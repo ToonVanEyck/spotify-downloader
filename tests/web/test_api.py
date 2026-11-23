@@ -9,6 +9,7 @@ from spotdl.types.options import DownloaderOptions
 from spotdl.utils import web as web_utils
 from spotdl.utils.arguments import create_parser
 from spotdl.utils.config import DOWNLOADER_OPTIONS
+from spotdl.utils.navidrome import NavidromeError
 from spotdl.utils.web import WEB_EDITABLE_SETTINGS, Client, app_state
 from spotdl.web import api
 
@@ -133,6 +134,57 @@ def test_get_options_only_returns_editable():
     assert set(options) == WEB_EDITABLE_SETTINGS
 
 
+@pytest.mark.parametrize("collected", [True, False])
+async def test_download_api_checks_navidrome_and_uses_shared_destination(
+    client, state, monkeypatch, mocker, tmp_path, collected
+):
+    monkeypatch.setattr(web_utils, "get_spotdl_path", lambda: tmp_path)
+    song = SimpleNamespace(name="Track", artist="Artist", url="track")
+    monkeypatch.setattr(api.Song, "from_url", lambda url: song)
+    connection = mocker.Mock()
+    connection.contains.return_value = collected
+    monkeypatch.setattr(
+        app_state,
+        "radio_monitor",
+        SimpleNamespace(optional_navidrome=lambda: connection),
+    )
+    path = tmp_path / "web" / "downloads" / "track.mp3"
+    audio = mocker.AsyncMock(return_value=(song, path))
+    monkeypatch.setattr(client.downloader, "pool_download", audio, raising=False)
+
+    response = await api.download_url("track", client, state)
+
+    connection.contains.assert_called_once_with("Artist", "Track")
+    assert client.downloader.settings["output"] == str(path.parent)
+    if collected:
+        assert response == {"status": "already collected", "song": "Track"}
+        audio.assert_not_called()
+    else:
+        assert response == str(path)
+        audio.assert_awaited_once_with(song)
+
+
+async def test_download_api_blocks_audio_when_navidrome_fails(
+    client, state, monkeypatch, mocker
+):
+    song = SimpleNamespace(name="Track", artist="Artist", url="track")
+    monkeypatch.setattr(api.Song, "from_url", lambda url: song)
+    connection = mocker.Mock()
+    connection.contains.side_effect = NavidromeError("Library unavailable")
+    monkeypatch.setattr(
+        app_state,
+        "radio_monitor",
+        SimpleNamespace(optional_navidrome=lambda: connection),
+    )
+    audio = mocker.AsyncMock()
+    monkeypatch.setattr(client.downloader, "pool_download", audio, raising=False)
+
+    with pytest.raises(HTTPException, match="Library unavailable"):
+        await api.download_url("track", client, state)
+    audio.assert_not_called()
+    assert "Library unavailable" in client.get_log_output()
+
+
 @pytest.mark.parametrize("client_id", ["../../etc", "a/b", "a\\b", "", "x" * 65])
 def test_connect_rejects_invalid_client_id(client_id):
     with pytest.raises(HTTPException) as exc_info:
@@ -142,17 +194,18 @@ def test_connect_rejects_invalid_client_id(client_id):
 
 
 @pytest.fixture()
-def session_dir(tmp_path, monkeypatch):
+def download_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "get_spotdl_path", lambda: tmp_path)
+    monkeypatch.setattr(web_utils, "get_spotdl_path", lambda: tmp_path)
 
-    path = tmp_path / "web" / "sessions" / "test-client"
+    path = tmp_path / "web" / "downloads"
     path.mkdir(parents=True)
 
     return path
 
 
-def test_download_file_allows_session_file(client, state, session_dir):
-    song = session_dir / "Artist - Title.mp3"
+def test_download_file_allows_shared_file(client, state, download_dir):
+    song = download_dir / "Artist - Title.mp3"
     song.write_bytes(b"")
 
     response = asyncio.run(api.download_file(str(song), client, state))
@@ -163,18 +216,20 @@ def test_download_file_allows_session_file(client, state, session_dir):
 @pytest.mark.parametrize(
     "relative_path",
     [
-        # Path traversal out of the session directory
+        # Path traversal out of the shared download directory
         "../../../../secret.mp3",
-        # Another client's session
-        "../other-client/Artist - Title.mp3",
+        # Old session files are not inside the shared download directory
+        "../sessions/other-client/Artist - Title.mp3",
         # Not an audio file
         "Artist - Title.txt",
         "notes.mp3.txt",
     ],
 )
-def test_download_file_rejects_invalid_paths(client, state, session_dir, relative_path):
+def test_download_file_rejects_invalid_paths(
+    client, state, download_dir, relative_path
+):
     with pytest.raises(HTTPException) as exc_info:
-        asyncio.run(api.download_file(str(session_dir / relative_path), client, state))
+        asyncio.run(api.download_file(str(download_dir / relative_path), client, state))
 
     assert exc_info.value.status_code == 400
 

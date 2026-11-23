@@ -167,7 +167,9 @@ def get_search_suggestions(
     for wrapper in search_results.get("artists", {}).get("items", [])[:limit]:
         artist = wrapper.get("data", {})
         profile = artist.get("profile", {})
-        sources = artist.get("visuals", {}).get("avatarImage", {}).get("sources", [])
+        visuals = artist.get("visuals") or {}
+        avatar = visuals.get("avatarImage") or {}
+        sources = avatar.get("sources") or []
         suggestions["artists"].append(
             _search_card(
                 "Artist",

@@ -51,6 +51,7 @@ dependencies = [
     "datastar-py>=1.0.0,<2",
     "jinja2>=3.1.5",
     "python-multipart>=0.0.20",
+    "tzdata>=2025.2",
 ]
 
 [project.urls]

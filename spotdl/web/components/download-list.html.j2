@@ -21,7 +21,11 @@
                     {{ client_song_download.song.album_name }}
                 </p>
                 <div class="mt-2 flex items-center gap-2">
-                    {% if client_song_download.progress == 100 %}
+                    {% if client_song_download.message == "Error" %}
+                    <span class="text-xs text-error">Failed &mdash; see terminal output below</span>
+                    {% elif client_song_download.message == "Already collected" %}
+                    <span class="text-xs text-info">Already collected</span>
+                    {% elif client_song_download.progress == 100 %}
                     <span class="text-xs text-success">Complete</span>
                     <a class="btn btn-ghost btn-xs btn-square"
                         data-attr="{href:'/api/download/file?file={{ client_song_download.path|urlencode|replace('/', '%2f') }}&client_id=' + $client_id}"

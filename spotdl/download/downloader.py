@@ -461,10 +461,6 @@ class Downloader:
         - This function is asynchronous.
         """
 
-        # Use the loop this coroutine is actually running on, which may not be
-        # self.loop when called directly as a library API
-        loop = asyncio.get_running_loop()
-
         # Check if song has name/artist and url/song_id
         if not (song.name and (song.artists or song.artist)) and not (
             song.url or song.song_id
@@ -491,7 +487,7 @@ class Downloader:
             )
         ):
             try:
-                song = await loop.run_in_executor(None, reinit_song, song)
+                song = await asyncio.to_thread(reinit_song, song)
 
             except Exception as e:
                 logger.error("Error occurred while reinitializing song: %s", e)
@@ -594,7 +590,7 @@ class Downloader:
 
             # Find song lyrics and add them to the song object
             try:
-                lyrics = await loop.run_in_executor(None, self.search_lyrics, song)
+                lyrics = await asyncio.to_thread(self.search_lyrics, song)
                 if lyrics is None:
                     logger.debug(
                         "No lyrics found for %s, lyrics providers: %s",
@@ -658,8 +654,7 @@ class Downloader:
                     return song, None
 
                 # Update the metadata
-                await loop.run_in_executor(
-                    None,
+                await asyncio.to_thread(
                     lambda: embed_metadata(
                         output_file=output_file,
                         song=song,
@@ -707,15 +702,14 @@ class Downloader:
 
             if song.download_url is None:
                 display_progress_tracker.notify_searching()
-                download_url = await loop.run_in_executor(None, self.search, song)
+                download_url = await asyncio.to_thread(self.search, song)
             else:
                 download_url = song.download_url
 
             display_progress_tracker.notify_getting_meta()
 
             logger.debug("Downloading %s using %s", song.display_name, download_url)
-            download_info = await loop.run_in_executor(
-                None,
+            download_info = await asyncio.to_thread(
                 lambda: audio_downloader.get_download_metadata(
                     download_url, download=True
                 ),
@@ -743,9 +737,7 @@ class Downloader:
                 self.settings["bitrate"] in ["auto", "disable", None]
                 and temp_file.suffix == output_file.suffix
             ):
-                await loop.run_in_executor(
-                    None, shutil.move, str(temp_file), str(output_file)
-                )
+                await asyncio.to_thread(shutil.move, str(temp_file), str(output_file))
                 success = True
                 result = None
             else:
@@ -834,8 +826,8 @@ class Downloader:
                 )
 
                 # Run the post processor to get the sponsor segments
-                _, download_info = await loop.run_in_executor(
-                    None, post_processor.run, download_info
+                _, download_info = await asyncio.to_thread(
+                    post_processor.run, download_info
                 )
                 chapters = download_info["sponsorblock_chapters"]
 
@@ -855,8 +847,8 @@ class Downloader:
 
                     # Run the post processor to remove the sponsor segments
                     # this returns a list of files to delete
-                    files_to_delete, download_info = await loop.run_in_executor(
-                        None, modify_chapters.run, download_info
+                    files_to_delete, download_info = await asyncio.to_thread(
+                        modify_chapters.run, download_info
                     )
 
                     # Delete the files that were created by the post processor
@@ -864,8 +856,7 @@ class Downloader:
                         Path(file_to_delete).unlink()
 
             try:
-                await loop.run_in_executor(
-                    None,
+                await asyncio.to_thread(
                     lambda: embed_metadata(
                         output_file,
                         song,
@@ -879,7 +870,7 @@ class Downloader:
                 ) from exception
 
             if self.settings["generate_lrc"]:
-                await loop.run_in_executor(None, generate_lrc, song, output_file)
+                await asyncio.to_thread(generate_lrc, song, output_file)
 
             display_progress_tracker.notify_complete()
             display_progress_tracker.set_path(str(output_file))

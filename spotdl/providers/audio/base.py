@@ -18,6 +18,7 @@ from spotdl.utils.formatter import (
     create_search_query,
     create_song_title,
 )
+from spotdl.utils.logging import web_log_output
 from spotdl.utils.matching import get_best_matches, order_results
 
 __all__ = ["AudioProviderError", "AudioProvider", "ISRC_REGEX", "YTDLLogger"]
@@ -41,14 +42,18 @@ class YTDLLogger:
         YTDL uses this to print debug messages.
         """
 
-        pass  # pylint: disable=W0107
+        output = web_log_output.get()
+        if output is not None:
+            output(f"[yt-dlp] {msg}")
 
     def warning(self, msg):
         """
         YTDL uses this to print warnings.
         """
 
-        pass  # pylint: disable=W0107
+        output = web_log_output.get()
+        if output is not None:
+            output(f"WARNING [yt-dlp] {msg}")
 
     def error(self, msg):
         """
@@ -57,6 +62,9 @@ class YTDLLogger:
 
         # yt-dlp routes deprecation notices (e.g. old Python versions) through
         # the error channel; they are not download failures
+        output = web_log_output.get()
+        if output is not None:
+            output(f"ERROR [yt-dlp] {msg}")
         if "Deprecated Feature" in msg:
             logger.debug(msg)
             return

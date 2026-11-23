@@ -4,9 +4,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from spotdl.providers.audio.base import YTDLLogger
 from spotdl.types.options import DownloaderOptions
 from spotdl.utils import web as web_utils
 from spotdl.utils.config import DOWNLOADER_OPTIONS
+from spotdl.utils.navidrome import NavidromeError
 from spotdl.utils.web import Client, app_state
 from spotdl.web import routes
 
@@ -26,6 +28,9 @@ def fake_app_state(monkeypatch):
         app_state, "logger", logging.getLogger("spotdl-test"), raising=False
     )
     monkeypatch.setattr(app_state, "clients", {})
+    monkeypatch.setattr(
+        app_state, "radio_monitor", SimpleNamespace(optional_navidrome=lambda: None)
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -110,7 +115,65 @@ def test_download_list_renders_empty_state():
     assert "No active downloads." in rendered
 
 
-def test_search_limits_results(monkeypatch):
+def test_home_uses_tab_session_without_footer():
+    rendered = routes.templates.get_template("home.html.j2").render()
+
+    assert "sessionStorage.getItem('client_id')" in rendered
+    assert "sessionStorage.setItem('client_id'" in rendered
+    assert "localStorage" not in rendered
+    assert "<footer" not in rendered
+    assert "Session downloads" in rendered
+    assert 'id="download-output"' in rendered
+
+
+def test_failed_download_is_not_shown_as_complete():
+    rendered = routes.templates.get_template("download-list.html.j2").render(
+        client_song_downloads=[
+            SimpleNamespace(
+                song=SimpleNamespace(name="Track", artist="Artist"),
+                message="Error",
+                progress=100,
+            )
+        ]
+    )
+
+    assert "Failed" in rendered
+    assert ">Complete<" not in rendered
+    assert "Download file" not in rendered
+
+
+async def test_downloads_stream_only_current_client_output(client):
+    client.append_log("ERROR <script>bad()</script>")
+    other_client = Client("other-client")
+    other_client.append_log("private output")
+    other_client.downloader.progress_handler.progress_tracker.add(
+        SimpleNamespace(url="other-track", name="Another session's track")
+    )
+    response = await routes.handle_get_client_downloads({"client_id": client.client_id})
+    stream = response.body_iterator
+    try:
+        downloads = await anext(stream)
+        output = await anext(stream)
+    finally:
+        await stream.aclose()
+
+    assert "No active downloads." in downloads
+    assert "Another session's track" not in downloads
+    assert "ERROR &lt;script&gt;bad()&lt;/script&gt;" in output
+    assert "private output" not in output
+
+
+def test_settings_keep_session_downloads(client):
+    song = SimpleNamespace(url="session-track", name="Session track")
+    tracker = client.downloader.progress_handler.progress_tracker
+    tracker.add(song)
+    client.update_settings({"format": "flac"})
+
+    assert client.downloader.progress_handler.progress_tracker is tracker
+    assert tracker.songs[song.url].song is song
+
+
+def test_search_limits_results(client, monkeypatch):
     search_calls = []
 
     def fake_search(search_term, limit=None):
@@ -161,9 +224,11 @@ def test_search_limits_results(monkeypatch):
     )
     assert "Grenade" in response_text
     assert "&#34;https://open.spotify.com/track/id&#34;" in response_text
+    assert "Searching Spotify: query" in client.get_log_output()
+    assert "Search complete" in client.get_log_output()
 
 
-def test_search_timeout_replaces_loading_state(monkeypatch):
+def test_search_timeout_replaces_loading_state(client, monkeypatch):
     async def timeout(*args, **kwargs):
         raise asyncio.TimeoutError
 
@@ -176,6 +241,26 @@ def test_search_timeout_replaces_loading_state(monkeypatch):
     )
 
     assert "Search timed out after 30 seconds" in read_response(response)
+    assert "ERROR Search timed out after 30 seconds" in client.get_log_output()
+
+
+def test_search_error_is_logged_with_traceback(client, monkeypatch):
+    def fail(*args, **kwargs):
+        raise ValueError("<provider error>")
+
+    monkeypatch.setattr(routes, "get_search_suggestions", fail)
+    response = asyncio.run(
+        routes.handle_get_client_search(
+            {"client_id": client.client_id, "search_term": "daft punk"}
+        )
+    )
+
+    assert "Search failed: &lt;provider error&gt;" in read_response(response)
+    output = client.get_log_output()
+    assert "Searching Spotify: daft punk" in output
+    assert "ERROR Search failed: <provider error>" in output
+    assert "Traceback (most recent call last)" in output
+    assert "ValueError: <provider error>" in output
 
 
 @pytest.mark.parametrize("collection", ["track", "album", "playlist", "artist"])
@@ -214,7 +299,10 @@ def test_search_url_shows_preview_without_downloading(monkeypatch, collection):
 
 def test_download_button_starts_collection_download(client, monkeypatch):
     monkeypatch.setattr(app_state, "web_settings", {}, raising=False)
-    songs = [SimpleNamespace(name="first"), SimpleNamespace(name="second")]
+    songs = [
+        SimpleNamespace(name="first", artist="Artist", url="first"),
+        SimpleNamespace(name="second", artist="Artist", url="second"),
+    ]
     parsed_queries = []
     downloaded_songs = []
     url = "https://open.spotify.com/album/example"
@@ -225,6 +313,7 @@ def test_download_button_starts_collection_download(client, monkeypatch):
 
     async def fake_pool_download(song):
         downloaded_songs.append(song)
+        await asyncio.to_thread(YTDLLogger().warning, f"warning for {song.name}")
         return song, "downloaded"
 
     monkeypatch.setattr(routes, "get_simple_songs", fake_get_simple_songs)
@@ -242,6 +331,113 @@ def test_download_button_starts_collection_download(client, monkeypatch):
     assert parsed_queries == [[url]]
     assert downloaded_songs == songs
     assert "Download complete" in response_text
+    assert "WARNING [yt-dlp] warning for first" in client.get_log_output()
+    assert "Download complete." in client.get_log_output()
+    assert (
+        "Navidrome is not configured; library check skipped" in client.get_log_output()
+    )
+
+
+@pytest.mark.parametrize("collected", [True, False])
+def test_regular_download_checks_navidrome_before_audio(
+    client, monkeypatch, mocker, tmp_path, collected
+):
+    monkeypatch.setattr(app_state, "web_settings", {}, raising=False)
+    song = SimpleNamespace(name="Track", artist="Artist", url="track")
+    connection = mocker.Mock()
+    connection.contains.return_value = collected
+    monkeypatch.setattr(
+        app_state,
+        "radio_monitor",
+        SimpleNamespace(optional_navidrome=lambda: connection),
+    )
+    monkeypatch.setattr(routes, "get_simple_songs", lambda *args, **kwargs: [song])
+
+    async def download(selected):
+        connection.contains.assert_called_once_with("Artist", "Track")
+        return selected, tmp_path / "song.mp3"
+
+    audio = mocker.AsyncMock(side_effect=download)
+    monkeypatch.setattr(client.downloader, "pool_download", audio, raising=False)
+    response = asyncio.run(
+        routes.handle_post_client_download(
+            {"client_id": client.client_id, "song_url": "track"}
+        )
+    )
+    output = read_response(response)
+
+    connection.contains.assert_called_once_with("Artist", "Track")
+    if collected:
+        audio.assert_not_called()
+        assert "1 already collected" in output
+        rendered = routes.templates.get_template("download-list.html.j2").render(
+            client_song_downloads=client.progress_handler.progress_tracker.songs.values()
+        )
+        assert "Already collected" in rendered
+        assert "Download file" not in rendered
+        assert ">Complete<" not in rendered
+    else:
+        audio.assert_awaited_once_with(song)
+        assert "Download complete." in output
+
+
+def test_collection_checks_each_song_and_library_errors_block_only_failed_tracks(
+    client, monkeypatch, mocker, tmp_path
+):
+    monkeypatch.setattr(app_state, "web_settings", {}, raising=False)
+    songs = [
+        SimpleNamespace(name=title, artist="Artist", url=title)
+        for title in ("Collected", "Missing", "Blocked")
+    ]
+    connection = mocker.Mock()
+
+    def contains(artist, title):
+        if title == "Blocked":
+            raise NavidromeError("Library unavailable")
+        return title == "Collected"
+
+    connection.contains.side_effect = contains
+    monkeypatch.setattr(
+        app_state,
+        "radio_monitor",
+        SimpleNamespace(optional_navidrome=lambda: connection),
+    )
+    monkeypatch.setattr(routes, "get_simple_songs", lambda *args, **kwargs: songs)
+    audio = mocker.AsyncMock(return_value=(songs[1], tmp_path / "missing.mp3"))
+    monkeypatch.setattr(client.downloader, "pool_download", audio, raising=False)
+    response = asyncio.run(
+        routes.handle_post_client_download(
+            {"client_id": client.client_id, "song_url": "album"}
+        )
+    )
+    output = read_response(response)
+
+    audio.assert_awaited_once_with(songs[1])
+    assert connection.contains.call_count == 3
+    assert "1 failed track(s)" in output
+    assert "1 already collected" in output
+    assert "Library unavailable" in client.get_log_output()
+    assert client.progress_handler.progress_tracker.songs["Blocked"].message == "Error"
+
+
+def test_download_preparation_error_is_logged_and_escaped(client, monkeypatch):
+    monkeypatch.setattr(app_state, "web_settings", {}, raising=False)
+
+    def fail(*args, **kwargs):
+        raise ValueError("<invalid URL>")
+
+    monkeypatch.setattr(routes, "get_simple_songs", fail)
+    response = asyncio.run(
+        routes.handle_post_client_download(
+            {"client_id": client.client_id, "song_url": "invalid"}
+        )
+    )
+    response_text = read_response(response)
+
+    assert "&lt;invalid URL&gt;" in response_text
+    assert (
+        "ERROR Could not process Spotify URL: <invalid URL>" in client.get_log_output()
+    )
 
 
 @pytest.mark.parametrize(

@@ -1,0 +1,90 @@
+{% extends "base.html.j2" %}
+
+{% block content %}
+<div class="mx-auto max-w-screen-2xl space-y-8 px-4 py-8 sm:px-6 lg:px-8">
+    <header>
+        <h1 class="text-2xl font-semibold">Radio monitor</h1>
+        <p class="mt-2 max-w-3xl text-sm text-base-content/65">
+            Follow songs from nuopderadio.be, Willy, and Willy Classic. Selected stations are checked every 30 minutes,
+            even with this tab closed, while the spotDL server is running.
+            The first check includes the existing history. Every song is checked against Navidrome before downloading.
+            Willy stations prefer their supplied YouTube links for yt-dlp audio downloads.
+        </p>
+    </header>
+
+    {% if error %}
+    <div class="alert alert-error" role="alert">{{ error|e }}</div>
+    {% elif request.query_params.get("saved") %}
+    <div class="alert alert-success" role="status">Settings saved. Enabled stations will be checked now.</div>
+    {% elif request.query_params.get("checking") %}
+    <div class="alert alert-info" role="status">Refresh requested. Failed tracks will be retried after the source refresh.</div>
+    {% endif %}
+
+    <form action="/radio/settings" method="post" class="grid gap-6 lg:grid-cols-2">
+        <fieldset class="rounded-lg border border-base-content/15 bg-base-200 p-5">
+            <legend class="px-2 text-lg font-semibold">Stations to monitor</legend>
+            <div class="grid gap-3 sm:grid-cols-2">
+                {% for station in stations %}
+                <label class="flex cursor-pointer items-center gap-3 rounded-md bg-base-100 p-3">
+                    <input type="checkbox" class="checkbox checkbox-primary checkbox-sm"
+                        name="stations" value="{{ station.id|e }}" {% if station.id in selected_stations %}checked{% endif %}>
+                    <span>{{ station.name|e }}</span>
+                </label>
+                {% endfor %}
+            </div>
+            <p class="mt-4 text-xs text-base-content/60">
+                Deselect all stations to pause. An already-running download may finish.
+                Re-enabling a station resumes queued songs and checks its current history.
+            </p>
+        </fieldset>
+
+        <fieldset class="space-y-4 rounded-lg border border-base-content/15 bg-base-200 p-5">
+            <legend class="px-2 text-lg font-semibold">Navidrome library</legend>
+            <p class="text-sm text-base-content/65">
+                Songs already in your library are marked <strong>already collected</strong>.
+                A failed library check blocks the download.
+            </p>
+            <label class="block text-sm">
+                Server URL
+                <input class="input mt-1 w-full" type="url" name="navidrome_url"
+                    placeholder="http://navidrome:4533" value="{{ navidrome_url|e }}">
+            </label>
+            <label class="block text-sm">
+                Username
+                <input class="input mt-1 w-full" name="navidrome_username"
+                    autocomplete="username" value="{{ navidrome_username|e }}">
+            </label>
+            <label class="block text-sm">
+                Password
+                <input class="input mt-1 w-full" type="password" name="navidrome_password"
+                    autocomplete="new-password"
+                    placeholder="{% if password_saved %}Saved; leave blank to keep it{% else %}Navidrome password{% endif %}">
+            </label>
+            <p class="text-xs text-base-content/60">
+                Save tests the connection first. Credentials are stored only on this server in a
+                private database and are never included in the live stream.
+                Changing the server URL or username requires entering the password again.
+                Use HTTPS outside a trusted local network. These are server-wide settings;
+                use the app only on a trusted network.
+            </p>
+            <button type="submit" class="btn btn-primary">Test connection &amp; save</button>
+        </fieldset>
+    </form>
+
+    <section class="rounded-lg border border-base-content/15 p-4 text-sm">
+        <h2 class="font-semibold">Download destination</h2>
+        <p class="mt-1 break-all font-mono text-xs">{{ output_directory|e }}</p>
+        <p class="mt-2 text-base-content/60">
+            Radio and regular web downloads share this persistent destination.
+            Files downloaded to older locations are not moved automatically.
+            To collect directly into your Navidrome music folder, start spotDL with
+            <code>--web-use-output-dir --output /path/to/music</code>.
+            Navidrome must scan that folder to show newly downloaded files.
+        </p>
+    </section>
+
+    <div data-on-load="@get('/radio/updates')">
+        {% include "radio-status.html.j2" %}
+    </div>
+</div>
+{% endblock content %}
