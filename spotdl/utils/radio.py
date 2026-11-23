@@ -471,12 +471,38 @@ class RadioMonitor:
     async def start(self) -> None:
         """Resume persisted polling and unfinished work when the server starts."""
 
+        self.configure_from_environment()
         self.tasks = [
             asyncio.create_task(self.poll_loop(), name="radio-poller"),
             asyncio.create_task(self.download_loop(), name="radio-downloader"),
             asyncio.create_task(self.playlist_loop(), name="radio-playlists"),
         ]
         self.queue_wake.set()
+
+    def configure_from_environment(self) -> None:
+        """Apply complete environment credentials without changing station choices."""
+
+        keys = ("NAVIDROME_URL", "NAVIDROME_USERNAME", "NAVIDROME_PASSWORD")
+        if not any(key in os.environ for key in keys):
+            return
+        if not all(os.environ.get(key) for key in keys):
+            raise ValueError(
+                "Set NAVIDROME_URL, NAVIDROME_USERNAME and NAVIDROME_PASSWORD together."
+            )
+        connection = Navidrome(
+            os.environ["NAVIDROME_URL"].strip().rstrip("/"),
+            os.environ["NAVIDROME_USERNAME"].strip(),
+            os.environ["NAVIDROME_PASSWORD"],
+        )
+        if connection != self.optional_navidrome():
+            with self.db:
+                self.db.execute(
+                    "UPDATE settings SET url=?, username=?, password=? WHERE id=1",
+                    (connection.url, connection.username, connection.password),
+                )
+                self.db.execute("""UPDATE playlist_state SET next_run=0, last_run='',
+                    attempted_at=0, error='' WHERE id=1""")
+        self.append_log("Navidrome connection loaded from environment variables.")
 
     async def stop(self) -> None:
         """Cancel owned tasks before closing persistent state."""

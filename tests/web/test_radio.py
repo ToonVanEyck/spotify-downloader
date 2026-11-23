@@ -165,3 +165,38 @@ async def test_router_lifespan_starts_and_stops_monitor(tmp_path, monkeypatch):
         assert len(monitor.tasks) == 3
     assert app_state.radio_monitor is None
     assert all(task.cancelled() for task in monitor.tasks)
+
+
+async def test_router_uses_persistent_config_directory_and_environment(
+    tmp_path, monkeypatch, mocker
+):
+    directory = tmp_path / "config"
+    monkeypatch.setenv("SPOTDL_RADIO_CONFIG_DIR", str(directory))
+    monkeypatch.setenv("NAVIDROME_URL", "https://music.example")
+    monkeypatch.setenv("NAVIDROME_USERNAME", "user")
+    monkeypatch.setenv("NAVIDROME_PASSWORD", "test-password")
+    monkeypatch.setattr(
+        app_state,
+        "downloader_settings",
+        DownloaderOptions(**DOWNLOADER_OPTIONS),
+        raising=False,
+    )
+    monkeypatch.setattr(app_state, "web_settings", {}, raising=False)
+    ping = mocker.patch.object(Navidrome, "ping")
+    app = FastAPI()
+    app.include_router(radio.router)
+    async with app.router.lifespan_context(app):
+        monitor = app_state.radio_monitor
+        assert monitor.navidrome().url == "https://music.example"
+        assert (directory / "radio.sqlite3").is_file()
+        with monitor.db:
+            monitor.db.execute("UPDATE stations SET enabled=1 WHERE id='willy'")
+    resumed = RadioMonitor(
+        directory / "radio.sqlite3", DownloaderOptions(**DOWNLOADER_OPTIONS)
+    )
+    try:
+        assert resumed.view()["selected_stations"] == ["willy"]
+        assert resumed.navidrome().username == "user"
+    finally:
+        resumed.db.close()
+    ping.assert_not_called()

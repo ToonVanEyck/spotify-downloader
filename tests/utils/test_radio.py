@@ -955,3 +955,76 @@ def test_optional_navidrome_only_skips_completely_unconfigured_connection(monito
         monitor.db.execute("UPDATE settings SET url='https://music.example' WHERE id=1")
     with pytest.raises(ValueError, match="username and password"):
         monitor.optional_navidrome()
+
+
+def test_environment_credentials_persist_without_resetting_radio_state(
+    monitor, tmp_path, monkeypatch
+):
+    enable(monitor, "willy", "nostalgie")
+    queue_play(monitor)
+    with monitor.db:
+        monitor.db.execute(
+            "UPDATE settings SET url=?, username=?, password=? WHERE id=1",
+            ("https://old.example", "old-user", "old-password"),
+        )
+        monitor.db.execute("UPDATE playlist_state SET next_run=99 WHERE id=1")
+    monkeypatch.setenv("NAVIDROME_URL", " https://music.example/ ")
+    monkeypatch.setenv("NAVIDROME_USERNAME", " user ")
+    monkeypatch.setenv("NAVIDROME_PASSWORD", "test-password")
+    monitor.configure_from_environment()
+    assert monitor.view()["playlists"]["next_run"] == 0
+    with monitor.db:
+        monitor.db.execute("UPDATE playlist_state SET next_run=1234 WHERE id=1")
+    monitor.configure_from_environment()
+    assert monitor.view()["playlists"]["next_run"] == 1234
+    for key in ("NAVIDROME_URL", "NAVIDROME_USERNAME", "NAVIDROME_PASSWORD"):
+        monkeypatch.delenv(key)
+
+    resumed = RadioMonitor(
+        tmp_path / "radio.sqlite3", DownloaderOptions(**DOWNLOADER_OPTIONS)
+    )
+    try:
+        resumed.configure_from_environment()
+        assert resumed.navidrome() == Navidrome(
+            "https://music.example", "user", "test-password"
+        )
+        assert set(resumed.view()["selected_stations"]) == {"willy", "nostalgie"}
+        assert len(resumed.view()["plays"]) == 1
+        assert "test-password" not in repr(resumed.view())
+    finally:
+        resumed.db.close()
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"NAVIDROME_URL": "https://music.example"},
+        {
+            "NAVIDROME_URL": "https://music.example",
+            "NAVIDROME_USERNAME": "user",
+            "NAVIDROME_PASSWORD": "",
+        },
+        {
+            "NAVIDROME_URL": "invalid",
+            "NAVIDROME_USERNAME": "user",
+            "NAVIDROME_PASSWORD": "test-password",
+        },
+    ],
+)
+def test_invalid_environment_does_not_replace_saved_connection(
+    monitor, monkeypatch, values
+):
+    with monitor.db:
+        monitor.db.execute(
+            "UPDATE settings SET url=?, username=?, password=? WHERE id=1",
+            ("https://saved.example", "saved-user", "saved-password"),
+        )
+    for key in ("NAVIDROME_URL", "NAVIDROME_USERNAME", "NAVIDROME_PASSWORD"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in values.items():
+        monkeypatch.setenv(key, value)
+    with pytest.raises(ValueError):
+        monitor.configure_from_environment()
+    assert monitor.navidrome() == Navidrome(
+        "https://saved.example", "saved-user", "saved-password"
+    )

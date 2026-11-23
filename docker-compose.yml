@@ -9,8 +9,10 @@ services:
     image: "spotdl/spotify-downloader"
     volumes:
       - spotdl_music:/music
+      - spotdl_config:/config
     environment:
       - TZ=${TZ:-UTC}
 
 volumes:
   spotdl_music:
+  spotdl_config:

@@ -43,11 +43,13 @@ RUN uv sync --no-dev
 # Fix permissions for the app dir
 RUN chown -R spotdl:spotdl /app
 
-# Pre-create the output directory so named volumes inherit writable ownership.
-RUN mkdir -p /music && chown spotdl:spotdl /music
+# Pre-create persistent directories so named volumes inherit writable ownership.
+RUN mkdir -p /music /config && chown spotdl:spotdl /music /config
 
-# Create a volume for the output directory
-VOLUME /music
+ENV SPOTDL_RADIO_CONFIG_DIR=/config
+
+# Persist downloads and radio configuration separately.
+VOLUME ["/music", "/config"]
 EXPOSE 8800
 
 # Change Workdir to download location

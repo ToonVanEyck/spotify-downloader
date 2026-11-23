@@ -1,7 +1,9 @@
 """Radio monitoring page, configuration forms, and application lifecycle."""
 
 import asyncio
+import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 
 from datastar_py.fastapi import ServerSentEventGenerator as SSE
@@ -20,8 +22,10 @@ from spotdl.web.utils import datastar_response
 async def monitor_lifespan(_app: FastAPI):
     """Own exactly one monitor for the server, not one per connected browser."""
 
+    config_directory = os.environ.get("SPOTDL_RADIO_CONFIG_DIR")
     monitor = RadioMonitor(
-        get_spotdl_path() / "radio.sqlite3",
+        (Path(config_directory) if config_directory else get_spotdl_path())
+        / "radio.sqlite3",
         app_state.downloader_settings,
         app_state.web_settings.get("web_use_output_dir", False),
     )

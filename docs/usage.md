@@ -349,6 +349,12 @@ The bundled timezone data keeps the schedule on Brussels time even when Docker
 uses UTC.
 
 Radio state is stored in `radio.sqlite3` in the spotDL configuration directory.
+Set `SPOTDL_RADIO_CONFIG_DIR` to use another directory; Docker defaults to
+`/config`, which should be mapped to persistent appdata. This overrides only the
+radio database location, not the general spotDL configuration directory.
+Optional `NAVIDROME_URL`, `NAVIDROME_USERNAME`, and `NAVIDROME_PASSWORD`
+environment variables must be supplied together and override saved credentials
+at startup without changing station selections.
 The database is owner-readable/writable only on Unix, but contains the Navidrome
 password **unencrypted** for Subsonic authentication. Protect this directory and
 its backups. Saved passwords are never rendered into the page or live stream;

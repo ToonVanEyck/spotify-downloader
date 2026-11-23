@@ -164,7 +164,27 @@ In Unraid, add a container with these settings:
 - Network type: `Bridge`
 - Port mapping: host `8800` to container `8800` over TCP
 - Path mapping: your music directory to container path `/music`
+- Path mapping: `/mnt/user/appdata/spotdl` to container path `/config` (read/write)
+- Optional environment variables (set all three together):
+  - `NAVIDROME_URL`: your server URL, for example `http://192.168.1.10:4533`
+  - `NAVIDROME_USERNAME`: your Navidrome username
+  - `NAVIDROME_PASSWORD`: your Navidrome password
 - Post Arguments: leave blank; the image starts the web server by default
+
+Radio station selections, history, retries, and Navidrome settings are stored in
+`/config/radio.sqlite3`. The appdata mapping preserves them when the container is
+updated or recreated. No separate JSON configuration file is needed.
+Environment credentials override saved credentials on every startup, without
+changing selected stations. Without those variables, saved credentials are used.
+The server need not be reachable during startup; library checks report connection
+errors and prevent downloads as usual.
+
+Both the database and Unraid's environment-variable configuration contain the
+password unencrypted. Protect appdata, backups, and access to container settings.
+Ensure the appdata directory is writable by the container's UID/GID.
+When upgrading an existing container, copy its old `radio.sqlite3` from the spotDL
+configuration directory to the mapped appdata folder before starting the new
+container if you want to keep its radio state.
 
 The image defaults to `--format opus --bitrate disable` for web and radio
 downloads, avoiding an extra lossy conversion when the source is WebM/Opus.
