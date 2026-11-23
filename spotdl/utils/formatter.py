@@ -260,7 +260,7 @@ def format_query(
 
     # Replace all the keys with the values
     for key, value in formats.items():
-        template = template.replace(key, str(value))
+        template = template.replace(key, "" if value is None else str(value))
 
     return template
 
@@ -335,6 +335,28 @@ def create_file_name(
     # If template does not end with {output-ext}, append it to the end of the template
     if not template.endswith(".{output-ext}"):
         template += ".{output-ext}"
+
+    if song.year is None:
+        template = template.replace(" ({year})", "")
+
+    if not song.album_name:
+        template_parts = re.split(r"([/\\])", template)
+        path_part_indexes = range(0, len(template_parts), 2)
+        file_part_index = max(
+            (index for index in path_part_indexes if template_parts[index]),
+            default=0,
+        )
+
+        for index in path_part_indexes:
+            if index != file_part_index and "{album}" in template_parts[index]:
+                template_parts[index] = ""
+
+        file_part = template_parts[file_part_index]
+        file_part = file_part.replace(" - {album} - ", " - ")
+        file_part = file_part.replace(" - {album}", "")
+        file_part = file_part.replace("{album} - ", "")
+        template_parts[file_part_index] = file_part.replace("{album}", "")
+        template = "".join(template_parts)
 
     formatted_string = format_query(
         song=song,

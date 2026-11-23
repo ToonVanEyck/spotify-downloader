@@ -13,6 +13,7 @@ from spotdl.utils.radio import (
     RadioError,
     RadioMonitor,
     RadioPlay,
+    parse_nostalgie_history,
     parse_radio_history,
     parse_willy_history,
     playlist_window,
@@ -88,6 +89,101 @@ def test_changed_source_markup_is_an_error():
         parse_radio_history("<html>upstream maintenance</html>")
 
 
+def nostalgie_track():
+    return {
+        "id": 9586963,
+        "radio_id": 9,
+        "artist": " Bee Gees ",
+        "title": " Night Fever ",
+        "played_at": "2026-11-23 14:50:57",
+    }
+
+
+@pytest.mark.parametrize(
+    ("timestamp", "expected"),
+    [
+        ("2026-11-23 14:50:57", "2026-11-23T13:50:57+00:00"),
+        ("2026-07-23 14:50:57", "2026-07-23T12:50:57+00:00"),
+        ("2026-10-25 02:30:00", "2026-10-25T00:30:00+00:00"),
+        ("2026-11-23T14:50:57+00:00", "2026-11-23T14:50:57+00:00"),
+    ],
+)
+def test_nostalgie_history_converts_station_timestamps(timestamp, expected):
+    track = {**nostalgie_track(), "played_at": timestamp}
+    entries = parse_nostalgie_history(
+        {"data": [track, {"artist": "", "title": "News"}]}
+    )
+    assert entries == [RadioPlay(expected, "Bee Gees", "Night Fever")]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"data": None},
+        {"data": [None]},
+        {"data": [{**nostalgie_track(), "played_at": None}]},
+        {"data": [{**nostalgie_track(), "played_at": "not a timestamp"}]},
+        {"data": [{**nostalgie_track(), "played_at": "2026-03-29 02:30:00"}]},
+    ],
+)
+def test_nostalgie_malformed_history_is_an_error(payload):
+    with pytest.raises(RadioError):
+        parse_nostalgie_history(payload)
+
+
+async def test_nostalgie_fetch_queues_and_downloads_using_spotify_search(
+    monitor, tmp_path, mocker
+):
+    enable(monitor, "nostalgie")
+    response = mocker.Mock()
+    response.json.return_value = {"data": [nostalgie_track()]}
+    get = mocker.patch.object(radio.requests, "get", return_value=response)
+    song = SimpleNamespace(name="Night Fever", artist="Bee Gees", download_url=None)
+    search = mocker.patch.object(radio, "get_search_results", return_value=[song])
+    connection = mocker.Mock()
+    connection.contains.return_value = False
+    mocker.patch.object(monitor, "navidrome", return_value=connection)
+    audio = tmp_path / "song.mp3"
+    audio.write_bytes(b"test audio")
+    monitor.downloader = mocker.Mock()
+    monitor.downloader.pool_download = mocker.AsyncMock(return_value=(song, audio))
+
+    await monitor.poll_station("nostalgie")
+    await monitor.poll_station("nostalgie")
+    rows = monitor.view()["plays"]
+    assert len(rows) == 1
+    await monitor.process_play(rows[0])
+
+    get.assert_called_with(
+        "https://mediahuis.pointbreak.dev/api/v1/radio/9/tracks-paginated",
+        headers={"User-Agent": "spotdl-radio-monitor"},
+        timeout=20,
+    )
+    assert get.call_count == 2
+    connection.contains.assert_called_once_with("Bee Gees", "Night Fever")
+    search.assert_called_once_with("Bee Gees Night Fever", limit=5)
+    monitor.downloader.pool_download.assert_awaited_once_with(song)
+    assert monitor.view()["plays"][0]["status"] == "downloaded"
+
+
+def test_existing_database_gains_nostalgie_without_losing_station_state(
+    monitor, tmp_path
+):
+    enable(monitor, "stubru")
+    with monitor.db:
+        monitor.db.execute("DELETE FROM stations WHERE id='nostalgie'")
+    resumed = RadioMonitor(
+        tmp_path / "radio.sqlite3", DownloaderOptions(**DOWNLOADER_OPTIONS)
+    )
+    try:
+        stations = {station["id"]: station for station in resumed.view()["stations"]}
+        assert stations["stubru"]["enabled"]
+        assert not stations["nostalgie"]["enabled"]
+    finally:
+        resumed.db.close()
+
+
 def willy_track():
     return {
         "played_at": "2026-11-23T12:05:00+01:00",
@@ -135,7 +231,7 @@ def test_willy_malformed_history_is_an_error(payload):
     ("station", "api_id"),
     [("willy", "willy_be"), ("willy-classic", "willy_be_class_x")],
 )
-async def test_willy_api_audio_survives_queue_and_is_used_directly(
+async def test_willy_api_uses_spotify_and_ignores_station_video(
     monitor, tmp_path, mocker, station, api_id
 ):
     enable(monitor, station)
@@ -153,7 +249,7 @@ async def test_willy_api_audio_survives_queue_and_is_used_directly(
     monitor.downloader = mocker.Mock()
 
     async def download(selected):
-        assert selected.download_url == "https://www.youtube.com/watch?v=i5Tiqv4Irjs"
+        assert selected.download_url is None
         return selected, audio
 
     monitor.downloader.pool_download = mocker.AsyncMock(side_effect=download)
@@ -294,18 +390,142 @@ async def test_library_failure_blocks_download_and_can_be_retried(monitor, mocke
     row = queue_play(monitor)
 
     await monitor.process_play(row)
-    assert monitor.view()["plays"][0]["status"] == "failed"
+    assert monitor.view()["plays"][0]["status"] == "retry"
+    assert monitor.view()["plays"][0]["attempts"] == 1
     assert "Unavailable" in monitor.view()["plays"][0]["message"]
     download.assert_not_called()
 
     mocker.patch.object(radio, "fetch_radio_history", return_value=[play()])
     await monitor.poll_station("stubru")
     row = monitor.view()["plays"][0]
-    assert row["status"] == "queued"
+    assert row["status"] == "retry"
     connection.contains.side_effect = None
     connection.contains.return_value = True
     await monitor.process_play(row)
     assert monitor.view()["plays"][0]["status"] == "already collected"
+
+
+async def test_retries_follow_normal_queue_and_stop_until_next_play(
+    monitor, tmp_path, mocker
+):
+    enable(monitor, "stubru")
+    connection = mocker.Mock()
+    connection.contains.return_value = False
+    mocker.patch.object(monitor, "navidrome", return_value=connection)
+    audio = tmp_path / "song.mp3"
+    audio.write_bytes(b"test audio")
+    calls = []
+    finished = asyncio.Event()
+
+    async def download(entry):
+        calls.append(entry.title)
+        if entry.title == "Failed" and calls.count("Failed") <= 2:
+            raise RadioError("Unavailable")
+        finished.set()
+        return audio
+
+    mocker.patch.object(monitor, "download", side_effect=download)
+    queue_play(monitor, entry=play("Failed"))
+    queue_play(monitor, entry=play("Normal", 1))
+    task = asyncio.create_task(monitor.download_loop())
+    try:
+
+        async def wait_for_failed():
+            while (
+                monitor.db.execute(
+                    "SELECT status FROM plays WHERE title='Failed'"
+                ).fetchone()["status"]
+                != "failed"
+            ):
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_for_failed(), timeout=2)
+        assert calls == ["Failed", "Normal", "Failed"]
+        row = monitor.db.execute(
+            "SELECT status, attempts FROM plays WHERE title='Failed'"
+        ).fetchone()
+        assert (row["status"], row["attempts"]) == ("failed", 2)
+
+        mocker.patch.object(radio, "fetch_radio_history", return_value=[play("Failed")])
+        await monitor.poll_station("stubru")
+        await asyncio.sleep(0.01)
+        assert calls == ["Failed", "Normal", "Failed"]
+
+        finished.clear()
+        mocker.patch.object(
+            radio, "fetch_radio_history", return_value=[play("Failed", 2)]
+        )
+        await monitor.poll_station("stubru")
+        await asyncio.wait_for(finished.wait(), timeout=2)
+        assert calls == ["Failed", "Normal", "Failed", "Failed"]
+        assert (
+            monitor.db.execute(
+                "SELECT status FROM plays WHERE title='Failed' ORDER BY id DESC"
+            ).fetchone()["status"]
+            == "downloaded"
+        )
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+async def test_retry_and_interrupted_retry_survive_restart(monitor, tmp_path, mocker):
+    enable(monitor, "stubru")
+    connection = mocker.Mock()
+    connection.contains.side_effect = NavidromeError("Unavailable")
+    mocker.patch.object(monitor, "navidrome", return_value=connection)
+    await monitor.process_play(queue_play(monitor))
+    with monitor.db:
+        monitor.db.execute("UPDATE plays SET status='checking' WHERE status='retry'")
+
+    resumed = RadioMonitor(
+        tmp_path / "radio.sqlite3", DownloaderOptions(**DOWNLOADER_OPTIONS)
+    )
+    try:
+        row = resumed.view()["plays"][0]
+        assert (row["status"], row["attempts"]) == ("retry", 1)
+        mocker.patch.object(resumed, "navidrome", return_value=connection)
+        await resumed.process_play(row)
+        row = resumed.view()["plays"][0]
+        assert (row["status"], row["attempts"]) == ("failed", 2)
+    finally:
+        resumed.db.close()
+
+
+async def test_retry_can_succeed_without_another_source_poll(monitor, tmp_path, mocker):
+    enable(monitor, "stubru")
+    connection = mocker.Mock()
+    connection.contains.return_value = False
+    mocker.patch.object(monitor, "navidrome", return_value=connection)
+    audio = tmp_path / "song.mp3"
+    audio.write_bytes(b"test audio")
+    download = mocker.patch.object(
+        monitor, "download", side_effect=[RadioError("Unavailable"), audio]
+    )
+    await monitor.process_play(queue_play(monitor))
+    await monitor.process_play(monitor.view()["plays"][0])
+    assert monitor.view()["plays"][0]["status"] == "downloaded"
+    assert download.await_count == 2
+
+
+async def test_legacy_failed_play_gets_one_retry(monitor, tmp_path):
+    queue_play(monitor)
+    with monitor.db:
+        monitor.db.execute("UPDATE plays SET status='failed', message='Old error'")
+        monitor.db.execute("ALTER TABLE plays DROP COLUMN attempts")
+    resumed = RadioMonitor(
+        tmp_path / "radio.sqlite3", DownloaderOptions(**DOWNLOADER_OPTIONS)
+    )
+    try:
+        row = resumed.view()["plays"][0]
+        assert (row["status"], row["attempts"], row["message"]) == (
+            "retry",
+            1,
+            "Old error",
+        )
+    finally:
+        resumed.db.close()
 
 
 async def test_same_song_on_two_stations_is_downloaded_only_once(
@@ -374,6 +594,24 @@ async def test_download_without_spotify_id_rejects_unrelated_recordings(
     with pytest.raises(RadioError, match="matching Spotify"):
         await monitor.download(play())
     assert monitor.downloader is None
+
+
+async def test_station_video_is_ignored_when_spotify_link_is_missing(
+    monitor, tmp_path, mocker
+):
+    song = SimpleNamespace(name="Song", artist="Artist", download_url=None)
+    search = mocker.patch.object(radio, "get_search_results", return_value=[song])
+    audio = tmp_path / "song.mp3"
+    audio.write_bytes(b"test audio")
+    monitor.downloader = mocker.Mock()
+    monitor.downloader.pool_download = mocker.AsyncMock(return_value=(song, audio))
+    entry = RadioPlay(
+        play().played_at, "Artist", "Song", youtube_url="https://youtu.be/i5Tiqv4Irjs"
+    )
+
+    assert await monitor.download(entry) == audio
+    search.assert_called_once_with("Artist Song", limit=5)
+    assert song.download_url is None
 
 
 async def test_classical_source_searches_by_composer_without_performer_notes(

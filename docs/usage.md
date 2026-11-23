@@ -259,7 +259,8 @@ path for successful downloads.
 
 Open the **Radio monitor** tab to collect songs from the nine stations on
 [nuopderadio.be](https://nuopderadio.be/), plus **Willy** and **Willy Classic**
-through the Willy API. Select stations, enter your Navidrome
+through the Willy API and **Nostalgie** through the Mediahuis API.
+Select stations, enter your Navidrome
 server URL, username, and password, then choose **Test connection & save**.
 The account must be able to search the music library through the Subsonic API.
 Use HTTPS unless the connection stays inside a trusted local network.
@@ -269,9 +270,14 @@ Use HTTPS unless the connection stays inside a trusted local network.
   station. Songs previously marked **baseline** are also queued on server restart.
 - New timestamped plays are compared against persisted history. News and other
   entries without an artist and song title are ignored.
-- Willy sources return the latest 30 plays. Their supplied YouTube links are
-  passed directly to yt-dlp for audio, using Spotify for metadata. If a play
-  has no YouTube link, the normal spotDL audio search is used.
+- Willy sources return the latest 30 plays. Their Spotify links are used for
+  metadata, and spotDL searches for audio rather than using the station's
+  supplied YouTube video. If no Spotify link is available, spotDL searches
+  Spotify by artist and title first.
+- Nostalgie returns the latest API page (currently 15 plays); songs are found
+  by artist and title. Its timestamps have no timezone, so they are interpreted
+  as Brussels local time. Repeated times during the autumn clock change cannot
+  be distinguished and are interpreted as the first occurrence.
 - Before downloading, spotDL searches Navidrome and compares both artist and
   title, ignoring case, accents, and punctuation. Version names such as "Live"
   remain significant. Matches are shown as **already collected**.
@@ -279,8 +285,9 @@ Use HTTPS unless the connection stays inside a trusted local network.
   downloads across stations while Navidrome is waiting to scan its library.
 - Library errors block downloads rather than being treated as missing songs.
   Source and download errors appear in the radio terminal and activity list.
-  Failed tracks are retried after the next source check, or using
-  **Check now / retry failed**.
+  A failed play is retried once when normal queued downloads are finished.
+  After two failures it remains failed; a new broadcast queues a new attempt.
+  Retry state survives restarts and is paused with its station.
 - Monitoring runs on the server, independent of browser sessions. Configuration,
   history, and work survive restarts. Deselect all stations to pause; an
   in-progress download may finish. Re-enabling a station resumes queued songs
@@ -299,6 +306,19 @@ spotdl web --keep-alive --web-use-output-dir --output /path/to/navidrome/music
 The Navidrome connection checks its library and publishes playlists; it does not
 upload audio files or trigger a library scan. Configure Navidrome to scan the chosen output folder. The
 `--web-use-output-dir` option also applies to ordinary web downloads.
+
+For audio without an extra lossy MP3 conversion, use Opus when your player
+supports it:
+
+```bash
+spotdl web --keep-alive --format opus --bitrate disable
+```
+
+These settings also apply to ordinary web downloads. spotDL requests the best
+available audio stream; Opus can be copied without re-encoding when the source
+is WebM/Opus. This does not make the original stream lossless. If MP3
+compatibility is required, `--bitrate 256k` reduces further encoding loss but
+cannot restore detail missing from the source.
 
 #### Nightly Navidrome playlists
 
@@ -392,7 +412,7 @@ If you don't want the config to load automatically, change the `load_config` opt
     "playlist_numbering": false,
     "scan_for_songs": false,
     "m3u": null,
-    "output": "{artists} - {title}.{output-ext}",
+    "output": "{artist}/{album} ({year})/{artist} - {album} - {track-number} - {title}.{output-ext}",
     "overwrite": "skip",
     "search_query": null,
     "ffmpeg": "ffmpeg",
@@ -448,6 +468,11 @@ If you don't want the config to load automatically, change the `load_config` opt
 #### `output` variables
 
 The `output` key supports several variables:
+
+By default, downloads are saved under an artist folder, then an album folder
+with its release year, with artist, album, track number, and title in the
+filename. If album metadata is unavailable, the album folder and album name are
+omitted.
 
 | Variable | Explanation | Example |
 |----------|-------------|---------|

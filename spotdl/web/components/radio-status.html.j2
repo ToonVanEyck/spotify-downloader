@@ -3,7 +3,7 @@
         <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
             <h2 id="radio-sources-heading" class="text-lg font-semibold">Source status</h2>
             <form action="/radio/check" method="post">
-                <button class="btn btn-outline btn-sm" type="submit">Check now / retry failed</button>
+                <button class="btn btn-outline btn-sm" type="submit">Check now</button>
             </form>
         </div>
         <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
@@ -32,7 +32,7 @@
         <h2 id="radio-plays-heading" class="mb-3 text-lg font-semibold">Recent radio plays</h2>
         <p class="mb-3 text-xs text-base-content/60">
             Latest 300 plays. Initial history is included in library checks and downloads.
-            Failed tracks are retried on the next source check.
+            Failed tracks are retried once after queued downloads; a later play can be tried again.
             Only the history still visible on the source can be recovered after downtime.
         </p>
         <div class="max-h-96 overflow-auto rounded-lg border border-base-content/15">

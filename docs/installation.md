@@ -166,6 +166,11 @@ In Unraid, add a container with these settings:
 - Path mapping: your music directory to container path `/music`
 - Post Arguments: leave blank; the image starts the web server by default
 
+The image defaults to `--format opus --bitrate disable` for web and radio
+downloads, avoiding an extra lossy conversion when the source is WebM/Opus.
+Custom Post Arguments replace the image's default command, so include these
+options if you override it.
+
 The container runs as UID `99` and GID `100` (Unraid's standard `nobody:users`
 IDs), so ensure the mapped music directory is writable by them. Open
 `http://<unraid-ip>:8800` to use the web UI.

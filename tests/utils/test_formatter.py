@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from spotdl.types.song import Song, SongList
+from spotdl.utils.config import DOWNLOADER_OPTIONS
 from spotdl.utils.formatter import (
     create_file_name,
     create_song_title,
@@ -98,6 +99,36 @@ def test_create_file_name():
         "mp3",
     ) == Path(  # type: ignore
         "05/11 Ropes - Dirty Palm.mp3"
+    )
+
+
+def test_default_file_name_uses_artist_album_and_track():
+    song = Song.from_missing_data(
+        name="Come Together",
+        artists=["The Beatles"],
+        artist="The Beatles",
+        album_name="Abbey Road",
+        year=1969,
+        track_number=1,
+    )
+
+    assert create_file_name(song, DOWNLOADER_OPTIONS["output"], "flac") == Path(
+        "The Beatles/Abbey Road (1969)/The Beatles - Abbey Road - 01 - Come Together.flac"
+    )
+
+
+def test_default_file_name_skips_unknown_album():
+    song = Song.from_missing_data(
+        name="Come Together",
+        artists=["The Beatles"],
+        artist="The Beatles",
+        album_name=None,
+        year=1969,
+        track_number=1,
+    )
+
+    assert create_file_name(song, DOWNLOADER_OPTIONS["output"], "flac") == Path(
+        "The Beatles/The Beatles - 01 - Come Together.flac"
     )
 
 

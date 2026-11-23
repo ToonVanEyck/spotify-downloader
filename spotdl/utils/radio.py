@@ -43,6 +43,7 @@ STATIONS = {
     "klara-continuo": "Klara Continuo",
     "willy": "Willy",
     "willy-classic": "Willy Classic",
+    "nostalgie": "Nostalgie",
 }
 WILLY_STATIONS = {"willy": "willy_be", "willy-classic": "willy_be_class_x"}
 PLAYLIST_TIMEZONE = ZoneInfo("Europe/Brussels")
@@ -184,6 +185,47 @@ def parse_willy_history(data: object) -> list[RadioPlay]:
     return plays
 
 
+def parse_nostalgie_history(data: object) -> list[RadioPlay]:
+    """Extract Nostalgie broadcasts, whose timestamps use Brussels local time."""
+
+    if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+        raise RadioError("Nostalgie response is missing its data list.")
+    plays = []
+    for track in data["data"]:
+        if not isinstance(track, dict):
+            raise RadioError("Invalid Nostalgie track data.")
+        artist, title = track.get("artist"), track.get("title")
+        if not isinstance(artist, str) or not isinstance(title, str):
+            continue
+        if not artist.strip() or not title.strip():
+            continue
+        timestamp = track.get("played_at")
+        if not isinstance(timestamp, str):
+            raise RadioError("A Nostalgie track is missing its broadcast timestamp.")
+        try:
+            played = datetime.fromisoformat(timestamp)
+        except ValueError as exception:
+            raise RadioError("Invalid Nostalgie broadcast timestamp.") from exception
+        if played.tzinfo is None:
+            local = played.replace(tzinfo=PLAYLIST_TIMEZONE)
+            if (
+                local.astimezone(timezone.utc)
+                .astimezone(PLAYLIST_TIMEZONE)
+                .replace(tzinfo=None)
+                != played
+            ):
+                raise RadioError("Invalid Nostalgie local broadcast timestamp.")
+            played = local
+        plays.append(
+            RadioPlay(
+                played.astimezone(timezone.utc).isoformat(),
+                artist.strip(),
+                title.strip(),
+            )
+        )
+    return plays
+
+
 def station_url(station: str) -> str:
     """Return a fixed, supported history source URL."""
 
@@ -194,11 +236,13 @@ def station_url(station: str) -> str:
             "https://api.willy.radio/2.0/tracks/plays?limit=30"
             f"&_station_id={WILLY_STATIONS[station]}"
         )
+    if station == "nostalgie":
+        return "https://mediahuis.pointbreak.dev/api/v1/radio/9/tracks-paginated"
     return f"https://nuopderadio.be/{station}/"
 
 
 def fetch_radio_history(station: str) -> list[RadioPlay]:
-    """Fetch a supported station's HTML history or Willy JSON API."""
+    """Fetch a supported station's HTML or JSON history."""
 
     response = requests.get(
         station_url(station),
@@ -208,6 +252,8 @@ def fetch_radio_history(station: str) -> list[RadioPlay]:
     response.raise_for_status()
     if station in WILLY_STATIONS:
         return parse_willy_history(response.json())
+    if station == "nostalgie":
+        return parse_nostalgie_history(response.json())
     return parse_radio_history(response.text)
 
 
@@ -269,14 +315,23 @@ class RadioMonitor:
             );
             INSERT OR IGNORE INTO playlist_state(id) VALUES (1);
             CREATE INDEX IF NOT EXISTS plays_status ON plays(status);
-            UPDATE plays SET status = 'queued'
-            WHERE status IN ('baseline', 'checking', 'downloading');
             """)
         columns = {row["name"] for row in self.db.execute("PRAGMA table_info(plays)")}
         if "youtube_url" not in columns:
             self.db.execute(
                 "ALTER TABLE plays ADD COLUMN youtube_url TEXT NOT NULL DEFAULT ''"
             )
+        if "attempts" not in columns:
+            self.db.execute(
+                "ALTER TABLE plays ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0"
+            )
+            self.db.execute(
+                "UPDATE plays SET status='retry', attempts=1 WHERE status='failed'"
+            )
+        self.db.execute(
+            """UPDATE plays SET status=CASE WHEN attempts > 0 THEN 'retry'
+            ELSE 'queued' END WHERE status IN ('baseline', 'checking', 'downloading')"""
+        )
         self.db.executemany(
             "INSERT OR IGNORE INTO stations(id) VALUES (?)",
             [(station,) for station in STATIONS],
@@ -461,10 +516,6 @@ class RadioMonitor:
                 "UPDATE stations SET initialized=1, checked_at=?, error='' WHERE id=?",
                 (time.time(), station),
             )
-            self.db.execute(
-                "UPDATE plays SET status='queued', message='' WHERE station=? AND status='failed'",
-                (station,),
-            )
         self.append_log(f"[{STATIONS[station]}] {added} new play(s) queued.")
         self.queue_wake.set()
 
@@ -524,9 +575,6 @@ class RadioMonitor:
             )
             if song is None:
                 raise RadioError("No matching Spotify recording found for this play.")
-        if play.youtube_url:
-            song.download_url = play.youtube_url
-            self.append_log(f"Using station YouTube audio: {play.youtube_url}")
         if self.downloader is None:
             self.downloader = await asyncio.to_thread(
                 Downloader, settings=self.settings, loop=asyncio.get_running_loop()
@@ -579,7 +627,11 @@ class RadioMonitor:
                 "SELECT enabled FROM stations WHERE id=?", (row["station"],)
             ).fetchone()["enabled"]
             if not enabled:
-                self.set_status(row["id"], "queued", "Source paused.")
+                self.set_status(
+                    row["id"],
+                    "retry" if row["attempts"] else "queued",
+                    "Source paused.",
+                )
                 return
             self.set_status(row["id"], "downloading")
             with capture_web_output(self.append_log):
@@ -592,12 +644,25 @@ class RadioMonitor:
             self.set_status(row["id"], "downloaded", path=str(path.absolute()))
             self.append_log(f"{label}: downloaded.")
         except asyncio.CancelledError:
-            self.set_status(row["id"], "queued", "Interrupted; will resume on restart.")
+            self.set_status(
+                row["id"],
+                "retry" if row["attempts"] else "queued",
+                "Interrupted; will resume on restart.",
+            )
             raise
         except Exception as exception:  # pylint: disable=broad-exception-caught
             logger.exception("Radio download failed for %s", label)
-            self.set_status(row["id"], "failed", str(exception))
-            self.append_log(f"ERROR {label}: {exception}")
+            attempts = row["attempts"] + 1
+            status = "retry" if attempts < 2 else "failed"
+            with self.db:
+                self.db.execute(
+                    "UPDATE plays SET status=?, message=?, attempts=? WHERE id=?",
+                    (status, str(exception), attempts, row["id"]),
+                )
+            action = (
+                "queued for retry" if status == "retry" else "giving up until replayed"
+            )
+            self.append_log(f"ERROR {label}: {exception} ({action}).")
 
     async def download_loop(self) -> None:
         """Process serially so duplicate plays cannot race before library scans."""
@@ -606,8 +671,9 @@ class RadioMonitor:
             self.queue_wake.clear()
             row = self.db.execute(
                 """SELECT plays.* FROM plays JOIN stations ON plays.station=stations.id
-                WHERE plays.status='queued' AND stations.enabled=1
-                ORDER BY plays.played_at, plays.id LIMIT 1"""
+                WHERE plays.status IN ('queued', 'retry') AND stations.enabled=1
+                ORDER BY CASE plays.status WHEN 'queued' THEN 0 ELSE 1 END,
+                plays.played_at, plays.id LIMIT 1"""
             ).fetchone()
             if row is None:
                 await self.queue_wake.wait()
