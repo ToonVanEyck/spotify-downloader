@@ -389,7 +389,7 @@ class RadioMonitor:
                 else "Not checked yet"
             )
             station["next_check"] = (
-                "When queue empties, not before "
+                "When new-song queue empties, not before "
                 + datetime.fromtimestamp(
                     row["checked_at"] + POLL_INTERVAL, timezone.utc
                 ).strftime("%Y-%m-%d %H:%M UTC")
@@ -578,7 +578,7 @@ class RadioMonitor:
         self.queue_wake.set()
 
     async def poll_loop(self) -> None:
-        """Refill empty station queues at most once per ten minutes each."""
+        """Refill when no first attempts remain, at most once per ten minutes."""
 
         while True:
             self.wake.clear()
@@ -592,10 +592,9 @@ class RadioMonitor:
                 ):
                     continue
                 if self.db.execute(
-                    """SELECT 1 FROM plays WHERE station=? AND
-                    (status IN ('queued', 'checking', 'downloading')
-                    OR (status='retry' AND retry_at<=?)) LIMIT 1""",
-                    (station["id"], time.time()),
+                    """SELECT 1 FROM plays WHERE station=? AND attempts=0
+                    AND status IN ('queued', 'checking', 'downloading') LIMIT 1""",
+                    (station["id"],),
                 ).fetchone():
                     continue
                 try:

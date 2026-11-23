@@ -114,11 +114,21 @@ async def updates():
 
     monitor = get_monitor()
     previous = None
+    previous_stations = None
     while True:
-        rendered = templates.get_template("radio-status.html.j2").render(
-            **monitor.view()
-        )
+        context = monitor.view()
+        rendered = templates.get_template("radio-status.html.j2").render(**context)
         if rendered != previous:
             yield SSE.patch_elements(rendered)
             previous = rendered
+        if context["selected_stations"] != previous_stations:
+            # A scalar avoids transient partial array updates resetting the filter.
+            yield SSE.patch_signals(
+                {
+                    "radio_enabled_stations": "|"
+                    + "|".join(context["selected_stations"])
+                    + "|"
+                }
+            )
+            previous_stations = context["selected_stations"]
         await asyncio.sleep(2)

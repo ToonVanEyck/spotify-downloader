@@ -6,8 +6,9 @@
         <h1 class="text-2xl font-semibold">Radio monitor</h1>
         <p class="mt-2 max-w-3xl text-sm text-base-content/65">
             Follow songs from nuopderadio.be, Willy, Willy Classic, and Nostalgie.
-            Each selected station refills when its queue is empty, at most once every 10 minutes,
+            Each selected station refills when its new-song queue is empty, at most once every 10 minutes,
             even with this tab closed, while the spotDL server is running.
+            Retries do not block refills, even while processing.
             The first check includes the existing history. Every song is checked against Navidrome before downloading.
             spotDL searches for audio using Spotify metadata instead of the station's video links.
         </p>
@@ -16,9 +17,9 @@
     {% if error %}
     <div class="alert alert-error" role="alert">{{ error|e }}</div>
     {% elif request.query_params.get("saved") %}
-    <div class="alert alert-success" role="status">Settings saved. Empty station queues will refresh when their 10-minute limit allows.</div>
+    <div class="alert alert-success" role="status">Settings saved. Empty new-song queues will refresh when their 10-minute limit allows.</div>
     {% elif request.query_params.get("checking") %}
-    <div class="alert alert-info" role="status">Refresh requested for empty station queues, respecting each station's 10-minute limit. Retry deadlines are unchanged.</div>
+    <div class="alert alert-info" role="status">Refresh requested for empty new-song queues, respecting each station's 10-minute limit. Retry deadlines are unchanged.</div>
     {% endif %}
 
     <form action="/radio/settings" method="post" class="grid gap-6 lg:grid-cols-2">
@@ -35,7 +36,7 @@
             </div>
             <p class="mt-4 text-xs text-base-content/60">
                 Deselect all stations to pause. An already-running download may finish.
-                Re-enabling a station resumes queued songs. Its history refreshes when the queue empties and the 10-minute limit allows.
+                Re-enabling a station resumes queued songs. Its history refreshes when the new-song queue empties and the 10-minute limit allows.
             </p>
         </fieldset>
 
@@ -72,19 +73,9 @@
         </fieldset>
     </form>
 
-    <section class="rounded-lg border border-base-content/15 p-4 text-sm">
-        <h2 class="font-semibold">Download destination</h2>
-        <p class="mt-1 break-all font-mono text-xs">{{ output_directory|e }}</p>
-        <p class="mt-2 text-base-content/60">
-            Radio and regular web downloads share this persistent destination.
-            Files downloaded to older locations are not moved automatically.
-            To collect directly into your Navidrome music folder, start spotDL with
-            <code>--web-use-output-dir --output /path/to/music</code>.
-            Navidrome must scan that folder to show newly downloaded files.
-        </p>
-    </section>
-
-    <div data-on-load="@get('/radio/updates')">
+    <div data-signals='{"radio_station_filter": "", "radio_enabled_stations": {{ ('|' ~ selected_stations|join('|') ~ '|')|tojson }}}'
+        data-effect="$radio_station_filter && !$radio_enabled_stations.includes('|' + $radio_station_filter + '|') && ($radio_station_filter = '')"
+        data-on-load="@get('/radio/updates')">
         {% include "radio-status.html.j2" %}
     </div>
 </div>

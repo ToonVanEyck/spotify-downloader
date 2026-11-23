@@ -267,12 +267,15 @@ Use HTTPS unless the connection stays inside a trusted local network.
 
 - The first successful fetch queues the existing history for Navidrome checks
   and downloads missing songs. Each enabled station refills independently when
-  its queue has no ready or active work, at most once every 10 minutes. Delayed
-  retries do not block fresh history. Failed fetches and **Check now** requests
+  no first-attempt songs are queued or processing, at most once every 10 minutes.
+  Retries never block fresh history, whether waiting, ready, or processing.
+  Failed fetches and **Check now** requests
   respect the same per-station limit, which survives restarts.
   Songs previously marked **baseline** are also queued on server restart.
 - New timestamped plays are compared against persisted history. News and other
   entries without an artist and song title are ignored.
+- The recent plays list shows the latest 300 plays across all stations; use its
+  station filter to view one monitored station's plays without changing monitoring.
 - Willy sources return the latest 30 plays. Their Spotify links are used for
   metadata, and spotDL searches for audio rather than using the station's
   supplied YouTube video. If no Spotify link is available, spotDL searches
@@ -296,7 +299,8 @@ Use HTTPS unless the connection stays inside a trusted local network.
 - Monitoring runs on the server, independent of browser sessions. Configuration,
   history, and work survive restarts. Deselect all stations to pause; an
   in-progress download may finish. Re-enabling a station resumes queued songs
-  and refreshes its history once its queue empties and the 10-minute limit allows.
+  and refreshes its history once its first-attempt queue empties and the
+  10-minute limit allows.
   History that has already disappeared from the source cannot be recovered after
   downtime.
 
@@ -345,8 +349,8 @@ existing playlists are left untouched and excluded from subsequent Super Mixes.
 
 Publishing starts at the next 03:00 after monitoring is first enabled. The
 schedule survives restarts; a missed run publishes the latest completed radio
-day on startup, rather than replaying every missed day. Errors appear on the
-radio page and terminal and are retried every five minutes. Partial publishing
+day on startup, rather than replaying every missed day. Errors appear in the
+radio page's terminal output and are retried every five minutes. Partial publishing
 is safe to retry without creating new daily copies. Deselecting all stations
 pauses publishing. The browser need not be open, but the server/container must
 be running. The account must have permission to create and modify playlists.

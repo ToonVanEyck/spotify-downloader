@@ -743,7 +743,7 @@ async def test_disabling_and_reenabling_queues_current_history(monitor, mocker):
     assert all(row["status"] == "queued" for row in monitor.view()["plays"])
 
 
-@pytest.mark.parametrize("status", ["queued", "checking", "downloading", "retry"])
+@pytest.mark.parametrize("status", ["queued", "checking", "downloading"])
 async def test_poller_refills_only_empty_stations_with_ten_minute_limit(
     monitor, monkeypatch, status
 ):
@@ -789,13 +789,19 @@ async def test_poller_refills_only_empty_stations_with_ten_minute_limit(
             await task
 
 
-async def test_delayed_retry_does_not_block_station_refill(monitor, mocker):
+@pytest.mark.parametrize(
+    ("status", "retry_delay"),
+    [("retry", 120), ("retry", -1), ("checking", -1), ("downloading", -1)],
+)
+async def test_retry_does_not_block_station_refill(
+    monitor, mocker, status, retry_delay
+):
     enable(monitor, "stubru")
     row = queue_play(monitor)
     with monitor.db:
         monitor.db.execute(
-            "UPDATE plays SET status='retry', attempts=1, retry_at=? WHERE id=?",
-            (radio.time.time() + 120, row["id"]),
+            "UPDATE plays SET status=?, attempts=1, retry_at=? WHERE id=?",
+            (status, radio.time.time() + retry_delay, row["id"]),
         )
     polled = asyncio.Event()
 

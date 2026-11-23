@@ -2,6 +2,7 @@ import logging
 from urllib.parse import urlencode
 
 import pytest
+from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException, Request
 
 from spotdl.types.options import DownloaderOptions
@@ -62,6 +63,8 @@ async def test_radio_page_lists_stations_without_password(monitor, mocker):
     assert "test-password" not in html
     assert "once every 10 minutes" in html
     assert "2, 4, 8, 16, and 32 minutes" in html
+    assert "Download destination" not in html
+    assert "Nightly Navidrome playlists" not in html
 
 
 async def test_settings_validate_and_redirect(monitor, mocker):
@@ -133,11 +136,6 @@ async def test_invalid_settings_preserve_non_secret_form_values(monitor, mocker)
 
 async def test_live_output_escapes_upstream_content(monitor):
     monitor.append_log("ERROR <script>not executable</script>")
-    with monitor.db:
-        monitor.db.execute(
-            "UPDATE playlist_state SET error=? WHERE id=1",
-            ("<script>playlist error</script>",),
-        )
     response = await radio.updates()
     stream = response.body_iterator
     try:
@@ -145,8 +143,49 @@ async def test_live_output_escapes_upstream_content(monitor):
     finally:
         await stream.aclose()
     assert "&lt;script&gt;not executable&lt;/script&gt;" in output
-    assert "&lt;script&gt;playlist error&lt;/script&gt;" in output
-    assert "Nightly Navidrome playlists" in output
+    assert "Nightly Navidrome playlists" not in output
+
+
+async def test_radio_station_filter_lists_only_monitored_stations(monitor):
+    with monitor.db:
+        monitor.db.execute("UPDATE stations SET enabled=1 WHERE id='stubru'")
+        monitor.db.executemany(
+            """INSERT INTO plays
+            (station, played_at, artist, title, spotify_url, song_key, status)
+            VALUES (?, '2026-11-23T12:00:00+00:00', 'Artist', ?, '', ?, 'queued')""",
+            [("stubru", "First", "first"), ("radio1", "Second", "second")],
+        )
+    response = await radio.radio_page(request())
+    page = BeautifulSoup(response.body, "html.parser")
+    select = page.select_one("#radio-station-filter")
+    assert select["data-bind"] == "radio_station_filter"
+    assert [(option["value"], option.text) for option in select.select("option")][
+        :3
+    ] == [("", "All stations"), ("radio1", "Radio 1"), ("radio2", "Radio 2")]
+    assert select.select_one('option[value="radio1"]').has_attr("hidden")
+    assert select.select_one('option[value="radio1"]').has_attr("disabled")
+    assert not select.select_one('option[value="stubru"]').has_attr("hidden")
+    first = page.find(string="Artist - First").find_parent("tr")
+    second = page.find(string="Artist - Second").find_parent("tr")
+    assert '$radio_station_filter === "stubru"' in first["data-show"]
+    assert '$radio_station_filter === "radio1"' in second["data-show"]
+    empty = page.find(string="No recent plays for Radio 2.").find_parent("tr")
+    assert empty["data-show"] == '$radio_station_filter === "radio2"'
+    assert "No recent plays for Radio 1." not in page.get_text()
+
+
+async def test_radio_updates_send_enabled_stations(monitor):
+    response = await radio.updates()
+    stream = response.body_iterator
+    try:
+        await anext(stream)
+        assert '"radio_enabled_stations":"||"' in await anext(stream)
+        with monitor.db:
+            monitor.db.execute("UPDATE stations SET enabled=1 WHERE id='stubru'")
+        await anext(stream)
+        assert '"radio_enabled_stations":"|stubru|"' in await anext(stream)
+    finally:
+        await stream.aclose()
 
 
 @pytest.mark.parametrize(

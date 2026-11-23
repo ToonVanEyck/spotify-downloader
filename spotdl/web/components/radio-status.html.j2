@@ -29,7 +29,21 @@
     </section>
 
     <section aria-labelledby="radio-plays-heading">
-        <h2 id="radio-plays-heading" class="mb-3 text-lg font-semibold">Recent radio plays</h2>
+        <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
+            <h2 id="radio-plays-heading" class="text-lg font-semibold">Recent radio plays</h2>
+            <label for="radio-station-filter" class="flex items-center gap-2 text-sm">
+                Station
+                <select id="radio-station-filter" class="select select-sm" data-bind="radio_station_filter" data-ignore-morph>
+                    <option value="">All stations</option>
+                    {% for station in stations %}
+                    <option value="{{ station.id|e }}"
+                        {% if not station.enabled %}hidden disabled{% endif %}
+                        data-attr-hidden="!$radio_enabled_stations.includes({{ ('|' ~ station.id ~ '|')|tojson|forceescape }})"
+                        data-attr-disabled="!$radio_enabled_stations.includes({{ ('|' ~ station.id ~ '|')|tojson|forceescape }})">{{ station.name|e }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+        </div>
         <p class="mb-3 text-xs text-base-content/60">
             Latest 300 plays. Initial history is included in library checks and downloads.
             Failed tracks get up to five retries after 2, 4, 8, 16, and 32 minutes,
@@ -43,7 +57,7 @@
                 </thead>
                 <tbody>
                     {% for play in plays %}
-                    <tr>
+                    <tr data-show="$radio_station_filter === '' || $radio_station_filter === {{ play.station|tojson|forceescape }}">
                         <td class="whitespace-nowrap text-xs">{{ play.played_at[:16]|replace("T", " ")|e }}</td>
                         <td>{{ play.station|e }}</td>
                         <td class="min-w-52">
@@ -65,34 +79,19 @@
                         </td>
                     </tr>
                     {% else %}
-                    <tr><td colspan="4" class="py-8 text-center text-base-content/60">
+                    <tr data-show="$radio_station_filter === ''"><td colspan="4" class="py-8 text-center text-base-content/60">
                         Select stations and save your Navidrome connection to start monitoring.
                     </td></tr>
                     {% endfor %}
+                    {% for station in stations %}
+                    {% if not plays|selectattr('station', 'equalto', station.id)|list %}
+                    <tr data-show="$radio_station_filter === {{ station.id|tojson|forceescape }}">
+                        <td colspan="4" class="py-8 text-center text-base-content/60">No recent plays for {{ station.name|e }}.</td>
+                    </tr>
+                    {% endif %}
+                    {% endfor %}
                 </tbody>
             </table>
-        </div>
-    </section>
-
-    <section aria-labelledby="radio-playlists-heading">
-        <h2 id="radio-playlists-heading" class="mb-3 text-lg font-semibold">Nightly Navidrome playlists</h2>
-        <div class="space-y-2 rounded-lg border border-base-content/15 bg-base-200 p-4 text-sm">
-            <p>Every day at <strong>03:00 Europe/Brussels</strong>, publish the previous 03:00-to-03:00 radio day.</p>
-            <p>One <strong>spotDL Radio - [station]</strong> playlist per monitored station and one
-                <strong>spotDL Radio - Super Mix</strong>. Duplicate songs are removed and existing playlists are replaced.</p>
-            <p class="text-xs text-base-content/65">Only songs already indexed by Navidrome can be included.
-                Publishing errors are retried every 5 minutes.</p>
-            {% if selected_stations %}
-            <p>Next scheduled run: {{ playlists.next_check|e }}</p>
-            {% else %}
-            <p>Paused &mdash; select stations to enable nightly publishing.</p>
-            {% endif %}
-            {% if playlists.last_run %}
-            <p>Last published radio day ended: {{ playlists.last_run|e }}</p>
-            {% endif %}
-            {% if playlists.error %}
-            <p class="break-words text-error" role="alert">{{ playlists.error|e }}</p>
-            {% endif %}
         </div>
     </section>
 
