@@ -5,7 +5,8 @@
     <header>
         <h1 class="text-2xl font-semibold">Radio monitor</h1>
         <p class="mt-2 max-w-3xl text-sm text-base-content/65">
-            Follow songs from nuopderadio.be, Willy, Willy Classic, and Nostalgie. Selected stations are checked every 30 minutes,
+            Follow songs from nuopderadio.be, Willy, Willy Classic, and Nostalgie.
+            Each selected station refills when its queue is empty, at most once every 10 minutes,
             even with this tab closed, while the spotDL server is running.
             The first check includes the existing history. Every song is checked against Navidrome before downloading.
             spotDL searches for audio using Spotify metadata instead of the station's video links.
@@ -15,9 +16,9 @@
     {% if error %}
     <div class="alert alert-error" role="alert">{{ error|e }}</div>
     {% elif request.query_params.get("saved") %}
-    <div class="alert alert-success" role="status">Settings saved. Enabled stations will be checked now.</div>
+    <div class="alert alert-success" role="status">Settings saved. Empty station queues will refresh when their 10-minute limit allows.</div>
     {% elif request.query_params.get("checking") %}
-    <div class="alert alert-info" role="status">Refresh requested. Failed tracks will be retried after the source refresh.</div>
+    <div class="alert alert-info" role="status">Refresh requested for empty station queues, respecting each station's 10-minute limit. Retry deadlines are unchanged.</div>
     {% endif %}
 
     <form action="/radio/settings" method="post" class="grid gap-6 lg:grid-cols-2">
@@ -34,7 +35,7 @@
             </div>
             <p class="mt-4 text-xs text-base-content/60">
                 Deselect all stations to pause. An already-running download may finish.
-                Re-enabling a station resumes queued songs and checks its current history.
+                Re-enabling a station resumes queued songs. Its history refreshes when the queue empties and the 10-minute limit allows.
             </p>
         </fieldset>
 

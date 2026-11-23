@@ -30,7 +30,9 @@ from spotdl.utils.web import get_web_download_output
 
 logger = logging.getLogger(__name__)
 
-POLL_INTERVAL = 30 * 60
+POLL_INTERVAL = 10 * 60
+DOWNLOAD_RETRIES = 5
+DOWNLOAD_RETRY_INTERVAL = 2 * 60
 STATIONS = {
     "radio1": "Radio 1",
     "radio2": "Radio 2",
@@ -332,6 +334,23 @@ class RadioMonitor:
             """UPDATE plays SET status=CASE WHEN attempts > 0 THEN 'retry'
             ELSE 'queued' END WHERE status IN ('baseline', 'checking', 'downloading')"""
         )
+        if "retry_at" not in columns:
+            self.db.execute(
+                "ALTER TABLE plays ADD COLUMN retry_at REAL NOT NULL DEFAULT 0"
+            )
+            for row in self.db.execute(
+                """SELECT id, attempts FROM plays
+                WHERE status IN ('retry', 'failed') AND attempts BETWEEN 1 AND ?""",
+                (DOWNLOAD_RETRIES,),
+            ).fetchall():
+                self.db.execute(
+                    "UPDATE plays SET status='retry', retry_at=? WHERE id=?",
+                    (
+                        time.time()
+                        + DOWNLOAD_RETRY_INTERVAL * 2 ** (row["attempts"] - 1),
+                        row["id"],
+                    ),
+                )
         self.db.executemany(
             "INSERT OR IGNORE INTO stations(id) VALUES (?)",
             [(station,) for station in STATIONS],
@@ -345,7 +364,6 @@ class RadioMonitor:
         self.log_lock = Lock()
         self.wake = asyncio.Event()
         self.queue_wake = asyncio.Event()
-        self.force_poll = False
         self.tasks: list[asyncio.Task] = []
 
     def append_log(self, message: str) -> None:
@@ -371,9 +389,10 @@ class RadioMonitor:
                 else "Not checked yet"
             )
             station["next_check"] = (
-                datetime.fromtimestamp(
+                "When queue empties, not before "
+                + datetime.fromtimestamp(
                     row["checked_at"] + POLL_INTERVAL, timezone.utc
-                ).strftime("%H:%M UTC")
+                ).strftime("%Y-%m-%d %H:%M UTC")
                 if row["checked_at"]
                 else "On enabling"
             )
@@ -391,6 +410,20 @@ class RadioMonitor:
         playlists["next_check"] = next_run.astimezone(PLAYLIST_TIMEZONE).strftime(
             "%Y-%m-%d %H:%M %Z"
         )
+        plays = []
+        for row in self.db.execute(
+            "SELECT * FROM plays ORDER BY played_at DESC, id DESC LIMIT 300"
+        ):
+            play = dict(row)
+            play["attempt_number"] = row["attempts"] + (row["status"] != "failed")
+            play["retry_check"] = (
+                datetime.fromtimestamp(row["retry_at"], timezone.utc).strftime(
+                    "%Y-%m-%d %H:%M:%S UTC"
+                )
+                if row["status"] == "retry" and row["retry_at"]
+                else ""
+            )
+            plays.append(play)
         return {
             "stations": stations,
             "selected_stations": [
@@ -400,9 +433,8 @@ class RadioMonitor:
             "navidrome_username": configuration["username"],
             "password_saved": bool(configuration["password"]),
             "output_directory": self.settings["output"],
-            "plays": self.db.execute(
-                "SELECT * FROM plays ORDER BY played_at DESC, id DESC LIMIT 300"
-            ).fetchall(),
+            "plays": plays,
+            "max_attempts": DOWNLOAD_RETRIES + 1,
             "output": output,
             "playlists": playlists,
         }
@@ -463,10 +495,10 @@ class RadioMonitor:
         self.check_now()
 
     def check_now(self) -> None:
-        """Wake the single poller; concurrent requests never start extra pollers."""
+        """Recheck empty queues without bypassing station or retry rate limits."""
 
-        self.force_poll = True
         self.wake.set()
+        self.queue_wake.set()
 
     async def start(self) -> None:
         """Resume persisted polling and unfinished work when the server starts."""
@@ -546,16 +578,25 @@ class RadioMonitor:
         self.queue_wake.set()
 
     async def poll_loop(self) -> None:
-        """Poll each enabled station every 30 minutes, independently of downloads."""
+        """Refill empty station queues at most once per ten minutes each."""
 
         while True:
             self.wake.clear()
-            force, self.force_poll = self.force_poll, False
             stations = self.db.execute(
                 "SELECT * FROM stations WHERE enabled=1"
             ).fetchall()
             for station in stations:
-                if not force and station["checked_at"] + POLL_INTERVAL > time.time():
+                if (
+                    station["checked_at"]
+                    and station["checked_at"] + POLL_INTERVAL > time.time()
+                ):
+                    continue
+                if self.db.execute(
+                    """SELECT 1 FROM plays WHERE station=? AND
+                    (status IN ('queued', 'checking', 'downloading')
+                    OR (status='retry' AND retry_at<=?)) LIMIT 1""",
+                    (station["id"], time.time()),
+                ).fetchone():
                     continue
                 try:
                     await self.poll_station(station["id"])
@@ -624,6 +665,7 @@ class RadioMonitor:
                 "UPDATE plays SET status=?, message=?, path=? WHERE id=?",
                 (status, message, path, play_id),
             )
+        self.wake.set()
 
     async def process_play(self, row: sqlite3.Row) -> None:
         """Never download after a failed library check, or collect a song twice."""
@@ -679,16 +721,25 @@ class RadioMonitor:
         except Exception as exception:  # pylint: disable=broad-exception-caught
             logger.exception("Radio download failed for %s", label)
             attempts = row["attempts"] + 1
-            status = "retry" if attempts < 2 else "failed"
+            status = "retry" if attempts <= DOWNLOAD_RETRIES else "failed"
+            delay = DOWNLOAD_RETRY_INTERVAL * 2 ** (attempts - 1)
+            retry_at = time.time() + delay if status == "retry" else 0
             with self.db:
                 self.db.execute(
-                    "UPDATE plays SET status=?, message=?, attempts=? WHERE id=?",
-                    (status, str(exception), attempts, row["id"]),
+                    """UPDATE plays SET status=?, message=?, attempts=?, retry_at=?
+                    WHERE id=?""",
+                    (status, str(exception), attempts, retry_at, row["id"]),
                 )
             action = (
-                "queued for retry" if status == "retry" else "giving up until replayed"
+                f"retry {attempts}/{DOWNLOAD_RETRIES} in {delay // 60} minutes"
+                if status == "retry"
+                else "giving up until replayed"
             )
-            self.append_log(f"ERROR {label}: {exception} ({action}).")
+            self.append_log(
+                f"ERROR {label}: attempt {attempts}/{DOWNLOAD_RETRIES + 1}: "
+                f"{exception} ({action})."
+            )
+            self.wake.set()
 
     async def download_loop(self) -> None:
         """Process serially so duplicate plays cannot race before library scans."""
@@ -697,12 +748,27 @@ class RadioMonitor:
             self.queue_wake.clear()
             row = self.db.execute(
                 """SELECT plays.* FROM plays JOIN stations ON plays.station=stations.id
-                WHERE plays.status IN ('queued', 'retry') AND stations.enabled=1
+                WHERE (plays.status='queued'
+                OR (plays.status='retry' AND plays.retry_at<=?)) AND stations.enabled=1
                 ORDER BY CASE plays.status WHEN 'queued' THEN 0 ELSE 1 END,
-                plays.played_at, plays.id LIMIT 1"""
+                plays.played_at, plays.id LIMIT 1""",
+                (time.time(),),
             ).fetchone()
             if row is None:
-                await self.queue_wake.wait()
+                retry_at = self.db.execute("""SELECT MIN(plays.retry_at) FROM plays
+                    JOIN stations ON plays.station=stations.id
+                    WHERE plays.status='retry' AND stations.enabled=1""").fetchone()[0]
+                try:
+                    await asyncio.wait_for(
+                        self.queue_wake.wait(),
+                        timeout=(
+                            max(0, retry_at - time.time())
+                            if retry_at is not None
+                            else None
+                        ),
+                    )
+                except asyncio.TimeoutError:
+                    pass
             else:
                 await self.process_play(row)
 

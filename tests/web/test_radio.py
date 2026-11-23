@@ -60,7 +60,8 @@ async def test_radio_page_lists_stations_without_password(monitor, mocker):
     assert 'href="/radio"' in html
     assert "https://music.example" in html
     assert "test-password" not in html
-    assert "30 minutes" in html
+    assert "once every 10 minutes" in html
+    assert "2, 4, 8, 16, and 32 minutes" in html
 
 
 async def test_settings_validate_and_redirect(monitor, mocker):
@@ -90,7 +91,7 @@ async def test_settings_validate_and_redirect(monitor, mocker):
     assert status == 303
     assert headers[b"location"] == b"/radio?saved=1"
     ping.assert_called_once()
-    assert monitor.force_poll
+    assert monitor.wake.is_set()
     assert {
         station["id"] for station in monitor.view()["stations"] if station["enabled"]
     } == {"stubru", "radio1"}
@@ -146,6 +147,32 @@ async def test_live_output_escapes_upstream_content(monitor):
     assert "&lt;script&gt;not executable&lt;/script&gt;" in output
     assert "&lt;script&gt;playlist error&lt;/script&gt;" in output
     assert "Nightly Navidrome playlists" in output
+
+
+@pytest.mark.parametrize(
+    ("status", "attempts", "expected"),
+    [
+        ("queued", 0, "Next attempt"),
+        ("retry", 2, "Next attempt"),
+        ("downloading", 2, "Attempt"),
+        ("downloaded", 2, "Attempt"),
+        ("failed", 6, "Attempt"),
+    ],
+)
+async def test_radio_activity_shows_attempt_number(monitor, status, attempts, expected):
+    with monitor.db:
+        monitor.db.execute(
+            """INSERT INTO plays
+            (station, played_at, artist, title, spotify_url, song_key, status,
+             attempts, retry_at) VALUES
+            ('stubru', '2026-11-23T12:00:00+00:00', 'Artist', 'Song', '', 'key', ?, ?, ?)""",
+            (status, attempts, 1795472400),
+        )
+    response = await radio.radio_page(request())
+    html = response.body.decode()
+    number = attempts if status == "failed" else attempts + 1
+    assert f"{expected}\n                                {number} / 6" in html
+    assert ("Retry after " in html) == (status == "retry")
 
 
 async def test_router_lifespan_starts_and_stops_monitor(tmp_path, monkeypatch):

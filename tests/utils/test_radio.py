@@ -416,10 +416,12 @@ async def test_retries_follow_normal_queue_and_stop_until_next_play(
     audio.write_bytes(b"test audio")
     calls = []
     finished = asyncio.Event()
+    clock = [1_000_000.0]
+    mocker.patch.object(radio, "time", SimpleNamespace(time=lambda: clock[0]))
 
     async def download(entry):
         calls.append(entry.title)
-        if entry.title == "Failed" and calls.count("Failed") <= 2:
+        if entry.title == "Failed" and calls.count("Failed") <= 6:
             raise RadioError("Unavailable")
         finished.set()
         return audio
@@ -430,26 +432,40 @@ async def test_retries_follow_normal_queue_and_stop_until_next_play(
     task = asyncio.create_task(monitor.download_loop())
     try:
 
-        async def wait_for_failed():
+        async def wait_for_attempts(count):
             while (
                 monitor.db.execute(
-                    "SELECT status FROM plays WHERE title='Failed'"
-                ).fetchone()["status"]
-                != "failed"
+                    "SELECT attempts FROM plays WHERE title='Failed'"
+                ).fetchone()["attempts"]
+                != count
             ):
                 await asyncio.sleep(0)
 
-        await asyncio.wait_for(wait_for_failed(), timeout=2)
-        assert calls == ["Failed", "Normal", "Failed"]
+        await asyncio.wait_for(finished.wait(), timeout=2)
+        assert calls == ["Failed", "Normal"]
+        for attempt, delay in enumerate([120, 240, 480, 960, 1920], start=1):
+            row = monitor.db.execute(
+                "SELECT * FROM plays WHERE title='Failed'"
+            ).fetchone()
+            assert row["status"] == "retry"
+            assert row["retry_at"] == clock[0] + delay
+            clock[0] += delay - 1
+            monitor.queue_wake.set()
+            await asyncio.sleep(0.01)
+            assert calls.count("Failed") == attempt
+            clock[0] += 1
+            monitor.queue_wake.set()
+            await asyncio.wait_for(wait_for_attempts(attempt + 1), timeout=2)
+
         row = monitor.db.execute(
             "SELECT status, attempts FROM plays WHERE title='Failed'"
         ).fetchone()
-        assert (row["status"], row["attempts"]) == ("failed", 2)
+        assert (row["status"], row["attempts"]) == ("failed", 6)
 
         mocker.patch.object(radio, "fetch_radio_history", return_value=[play("Failed")])
         await monitor.poll_station("stubru")
         await asyncio.sleep(0.01)
-        assert calls == ["Failed", "Normal", "Failed"]
+        assert calls.count("Failed") == 6
 
         finished.clear()
         mocker.patch.object(
@@ -457,7 +473,7 @@ async def test_retries_follow_normal_queue_and_stop_until_next_play(
         )
         await monitor.poll_station("stubru")
         await asyncio.wait_for(finished.wait(), timeout=2)
-        assert calls == ["Failed", "Normal", "Failed", "Failed"]
+        assert calls == ["Failed", "Normal"] + ["Failed"] * 6
         assert (
             monitor.db.execute(
                 "SELECT status FROM plays WHERE title='Failed' ORDER BY id DESC"
@@ -485,10 +501,11 @@ async def test_retry_and_interrupted_retry_survive_restart(monitor, tmp_path, mo
     try:
         row = resumed.view()["plays"][0]
         assert (row["status"], row["attempts"]) == ("retry", 1)
+        assert row["retry_at"] == monitor.view()["plays"][0]["retry_at"]
         mocker.patch.object(resumed, "navidrome", return_value=connection)
         await resumed.process_play(row)
         row = resumed.view()["plays"][0]
-        assert (row["status"], row["attempts"]) == ("failed", 2)
+        assert (row["status"], row["attempts"]) == ("retry", 2)
     finally:
         resumed.db.close()
 
@@ -503,17 +520,29 @@ async def test_retry_can_succeed_without_another_source_poll(monitor, tmp_path, 
     download = mocker.patch.object(
         monitor, "download", side_effect=[RadioError("Unavailable"), audio]
     )
-    await monitor.process_play(queue_play(monitor))
-    await monitor.process_play(monitor.view()["plays"][0])
-    assert monitor.view()["plays"][0]["status"] == "downloaded"
-    assert download.await_count == 2
+    mocker.patch.object(radio, "DOWNLOAD_RETRY_INTERVAL", 0.02)
+    queue_play(monitor)
+    task = asyncio.create_task(monitor.download_loop())
+    try:
+
+        async def wait_for_download():
+            while monitor.view()["plays"][0]["status"] != "downloaded":
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_for_download(), timeout=1)
+        assert download.await_count == 2
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
 
 
-async def test_legacy_failed_play_gets_one_retry(monitor, tmp_path):
+async def test_legacy_failed_play_gets_scheduled_retries(monitor, tmp_path):
     queue_play(monitor)
     with monitor.db:
         monitor.db.execute("UPDATE plays SET status='failed', message='Old error'")
         monitor.db.execute("ALTER TABLE plays DROP COLUMN attempts")
+        monitor.db.execute("ALTER TABLE plays DROP COLUMN retry_at")
     resumed = RadioMonitor(
         tmp_path / "radio.sqlite3", DownloaderOptions(**DOWNLOADER_OPTIONS)
     )
@@ -524,6 +553,33 @@ async def test_legacy_failed_play_gets_one_retry(monitor, tmp_path):
             1,
             "Old error",
         )
+        assert row["retry_at"] > radio.time.time()
+    finally:
+        resumed.db.close()
+
+
+@pytest.mark.parametrize("status", ["failed", "retry", "checking", "downloading"])
+def test_existing_failed_play_migrates_to_remaining_retries(
+    monitor, tmp_path, mocker, status
+):
+    queue_play(monitor)
+    mocker.patch.object(radio, "time", SimpleNamespace(time=lambda: 1_000_000.0))
+    with monitor.db:
+        monitor.db.execute(
+            "UPDATE plays SET status=?, attempts=2, message='Old error'", (status,)
+        )
+        monitor.db.execute("ALTER TABLE plays DROP COLUMN retry_at")
+    resumed = RadioMonitor(
+        tmp_path / "radio.sqlite3", DownloaderOptions(**DOWNLOADER_OPTIONS)
+    )
+    try:
+        row = resumed.view()["plays"][0]
+        assert (row["status"], row["attempts"], row["retry_at"]) == (
+            "retry",
+            2,
+            1_000_240.0,
+        )
+        assert row["message"] == "Old error"
     finally:
         resumed.db.close()
 
@@ -687,8 +743,13 @@ async def test_disabling_and_reenabling_queues_current_history(monitor, mocker):
     assert all(row["status"] == "queued" for row in monitor.view()["plays"])
 
 
-async def test_poller_waits_thirty_minutes_but_can_be_woken(monitor, monkeypatch):
-    enable(monitor, "stubru")
+@pytest.mark.parametrize("status", ["queued", "checking", "downloading", "retry"])
+async def test_poller_refills_only_empty_stations_with_ten_minute_limit(
+    monitor, monkeypatch, status
+):
+    enable(monitor, "stubru", "radio1")
+    busy = queue_play(monitor, "radio1")
+    monitor.set_status(busy["id"], status)
     clock = [1_000_000.0]
     monkeypatch.setattr(radio, "time", SimpleNamespace(time=lambda: clock[0]))
     polled = asyncio.Event()
@@ -697,7 +758,9 @@ async def test_poller_waits_thirty_minutes_but_can_be_woken(monitor, monkeypatch
     async def poll(station):
         calls.append(station)
         with monitor.db:
-            monitor.db.execute("UPDATE stations SET checked_at=?", (clock[0],))
+            monitor.db.execute(
+                "UPDATE stations SET checked_at=? WHERE id=?", (clock[0], station)
+            )
         polled.set()
 
     monkeypatch.setattr(monitor, "poll_station", poll)
@@ -705,21 +768,128 @@ async def test_poller_waits_thirty_minutes_but_can_be_woken(monitor, monkeypatch
     try:
         await asyncio.wait_for(polled.wait(), timeout=1)
         polled.clear()
+        monitor.check_now()
+        await asyncio.sleep(0.01)
+        assert calls == ["stubru"]
+        clock[0] += 599
         monitor.wake.set()
         await asyncio.sleep(0.01)
         assert calls == ["stubru"]
-        clock[0] += 1800
+        clock[0] += 1
         monitor.wake.set()
         await asyncio.wait_for(polled.wait(), timeout=1)
         assert calls == ["stubru", "stubru"]
         polled.clear()
-        monitor.check_now()
+        monitor.set_status(busy["id"], "downloaded")
         await asyncio.wait_for(polled.wait(), timeout=1)
-        assert calls == ["stubru", "stubru", "stubru"]
+        assert calls == ["stubru", "stubru", "radio1"]
     finally:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+async def test_delayed_retry_does_not_block_station_refill(monitor, mocker):
+    enable(monitor, "stubru")
+    row = queue_play(monitor)
+    with monitor.db:
+        monitor.db.execute(
+            "UPDATE plays SET status='retry', attempts=1, retry_at=? WHERE id=?",
+            (radio.time.time() + 120, row["id"]),
+        )
+    polled = asyncio.Event()
+
+    async def poll(station):
+        assert station == "stubru"
+        polled.set()
+
+    mocker.patch.object(monitor, "poll_station", side_effect=poll)
+    task = asyncio.create_task(monitor.poll_loop())
+    try:
+        await asyncio.wait_for(polled.wait(), timeout=1)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+async def test_failed_station_refill_is_rate_limited(monitor, mocker):
+    enable(monitor, "stubru")
+    clock = [1_000_000.0]
+    mocker.patch.object(radio, "time", SimpleNamespace(time=lambda: clock[0]))
+    fetch = mocker.patch.object(
+        radio, "fetch_radio_history", side_effect=RadioError("Unavailable")
+    )
+    task = asyncio.create_task(monitor.poll_loop())
+    try:
+
+        async def wait_for_error():
+            while not monitor.db.execute(
+                "SELECT error FROM stations WHERE id='stubru'"
+            ).fetchone()["error"]:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_for_error(), timeout=1)
+        monitor.check_now()
+        await asyncio.sleep(0.01)
+        fetch.assert_called_once_with("stubru")
+        clock[0] += 600
+        monitor.wake.set()
+
+        async def wait_for_second_fetch():
+            while fetch.call_count < 2:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_for_second_fetch(), timeout=1)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+async def test_refill_and_retry_deadlines_survive_restart(monitor, tmp_path, mocker):
+    enable(monitor, "stubru")
+    clock = [1_000_000.0]
+    mocker.patch.object(radio, "time", SimpleNamespace(time=lambda: clock[0]))
+    mocker.patch.object(radio, "fetch_radio_history", return_value=[play()])
+    await monitor.poll_station("stubru")
+    with monitor.db:
+        monitor.db.execute(
+            "UPDATE plays SET status='retry', attempts=1, retry_at=?",
+            (clock[0] + 120,),
+        )
+    resumed = RadioMonitor(
+        tmp_path / "radio.sqlite3", DownloaderOptions(**DOWNLOADER_OPTIONS)
+    )
+    fetch = mocker.patch.object(resumed, "poll_station")
+    processed = asyncio.Event()
+
+    async def process(row):
+        assert row["attempts"] == 1
+        resumed.set_status(row["id"], "already collected")
+        processed.set()
+
+    process_mock = mocker.patch.object(resumed, "process_play", side_effect=process)
+    tasks = [
+        asyncio.create_task(resumed.poll_loop()),
+        asyncio.create_task(resumed.download_loop()),
+    ]
+    try:
+        resumed.check_now()
+        await asyncio.sleep(0.01)
+        fetch.assert_not_awaited()
+        process_mock.assert_not_awaited()
+        clock[0] += 120
+        resumed.queue_wake.set()
+        await asyncio.wait_for(processed.wait(), timeout=1)
+        fetch.assert_not_awaited()
+    finally:
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        resumed.db.close()
 
 
 @pytest.mark.parametrize(

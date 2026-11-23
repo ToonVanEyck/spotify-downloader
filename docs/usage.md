@@ -266,8 +266,11 @@ The account must be able to search the music library through the Subsonic API.
 Use HTTPS unless the connection stays inside a trusted local network.
 
 - The first successful fetch queues the existing history for Navidrome checks
-  and downloads missing songs. Subsequent checks run every 30 minutes per enabled
-  station. Songs previously marked **baseline** are also queued on server restart.
+  and downloads missing songs. Each enabled station refills independently when
+  its queue has no ready or active work, at most once every 10 minutes. Delayed
+  retries do not block fresh history. Failed fetches and **Check now** requests
+  respect the same per-station limit, which survives restarts.
+  Songs previously marked **baseline** are also queued on server restart.
 - New timestamped plays are compared against persisted history. News and other
   entries without an artist and song title are ignored.
 - Willy sources return the latest 30 plays. Their Spotify links are used for
@@ -285,13 +288,15 @@ Use HTTPS unless the connection stays inside a trusted local network.
   downloads across stations while Navidrome is waiting to scan its library.
 - Library errors block downloads rather than being treated as missing songs.
   Source and download errors appear in the radio terminal and activity list.
-  A failed play is retried once when normal queued downloads are finished.
-  After two failures it remains failed; a new broadcast queues a new attempt.
-  Retry state survives restarts and is paused with its station.
+  A failed play gets up to five retries, waiting 2, 4, 8, 16, and 32 minutes
+  after each failure. Ready retries run after normal queued downloads.
+  After six failed attempts it remains failed; a new broadcast queues a new attempt.
+  The activity list shows the attempt number and retry deadline.
+  Retry state and deadlines survive restarts and are paused with the station.
 - Monitoring runs on the server, independent of browser sessions. Configuration,
   history, and work survive restarts. Deselect all stations to pause; an
   in-progress download may finish. Re-enabling a station resumes queued songs
-  and checks its current history.
+  and refreshes its history once its queue empties and the 10-minute limit allows.
   History that has already disappeared from the source cannot be recovered after
   downtime.
 

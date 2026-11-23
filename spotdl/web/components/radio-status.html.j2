@@ -32,7 +32,8 @@
         <h2 id="radio-plays-heading" class="mb-3 text-lg font-semibold">Recent radio plays</h2>
         <p class="mb-3 text-xs text-base-content/60">
             Latest 300 plays. Initial history is included in library checks and downloads.
-            Failed tracks are retried once after queued downloads; a later play can be tried again.
+            Failed tracks get up to five retries after 2, 4, 8, 16, and 32 minutes,
+            after normal queued downloads; a later play can be tried again.
             Only the history still visible on the source can be recovered after downtime.
         </p>
         <div class="max-h-96 overflow-auto rounded-lg border border-base-content/15">
@@ -54,6 +55,13 @@
                             <span class="badge badge-sm whitespace-nowrap {{ {'downloaded': 'badge-success', 'already collected': 'badge-info', 'failed': 'badge-error', 'downloading': 'badge-primary', 'checking': 'badge-warning'}.get(play.status, 'badge-ghost') }}">
                                 {{ play.status|e }}
                             </span>
+                            <p class="mt-1 whitespace-nowrap text-xs text-base-content/60">
+                                {{ "Next attempt" if play.status in ('queued', 'retry') else "Attempt" }}
+                                {{ play.attempt_number }} / {{ max_attempts }}
+                            </p>
+                            {% if play.retry_check %}
+                            <p class="mt-1 whitespace-nowrap text-xs text-base-content/60">Retry after {{ play.retry_check|e }}</p>
+                            {% endif %}
                         </td>
                     </tr>
                     {% else %}

@@ -100,7 +100,7 @@ async def save_settings(
 
 @router.post("/radio/check")
 async def check_now(request: Request):
-    """Request an immediate refresh without spawning a second polling task."""
+    """Wake the poller without bypassing per-station refill rate limits."""
 
     check_origin(request)
     get_monitor().check_now()
