@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -15,6 +16,7 @@ from spotdl.utils.radio import (
     RadioPlay,
     parse_nostalgie_history,
     parse_radio_history,
+    parse_sky_radio_history,
     parse_willy_history,
     playlist_window,
 )
@@ -130,6 +132,139 @@ def test_nostalgie_history_converts_station_timestamps(timestamp, expected):
 def test_nostalgie_malformed_history_is_an_error(payload):
     with pytest.raises(RadioError):
         parse_nostalgie_history(payload)
+
+
+def test_sky_radio_history_converts_timestamps_and_extracts_spotify_links():
+    payload = {
+        "data": {
+            "station": {
+                "getPlayouts": {
+                    "playouts": [
+                        {
+                            "broadcastDate": "2026-11-24T10:32:31Z",
+                            "track": {
+                                "artistName": " Racoon ",
+                                "title": " Love You More ",
+                                "media": [
+                                    {
+                                        "source": "spotify_uri",
+                                        "uri": "spotify:track:0123456789012345678901",
+                                    }
+                                ],
+                            },
+                        },
+                        {
+                            "broadcastDate": "2026-11-24T10:29:08+01:00",
+                            "track": {"artistName": "Artist", "title": "Song"},
+                        },
+                        {"track": None},
+                    ]
+                }
+            }
+        }
+    }
+
+    assert parse_sky_radio_history(payload) == [
+        RadioPlay(
+            "2026-11-24T10:32:31+00:00",
+            "Racoon",
+            "Love You More",
+            "https://open.spotify.com/track/0123456789012345678901",
+        ),
+        RadioPlay("2026-11-24T09:29:08+00:00", "Artist", "Song"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        {},
+        {"data": []},
+        {"data": {"station": None}},
+        {"data": {"station": {"getPlayouts": {"playouts": None}}}},
+        {
+            "data": {
+                "station": {
+                    "getPlayouts": {
+                        "playouts": [
+                            {
+                                "broadcastDate": "not a timestamp",
+                                "track": {"artistName": "Artist", "title": "Song"},
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+        {
+            "data": {
+                "station": {
+                    "getPlayouts": {
+                        "playouts": [
+                            {
+                                "broadcastDate": "2026-11-24T10:32:31",
+                                "track": {"artistName": "Artist", "title": "Song"},
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+        {
+            "data": {
+                "station": {
+                    "getPlayouts": {
+                        "playouts": [
+                            {
+                                "broadcastDate": "2026-11-24T10:32:31Z",
+                                "track": {
+                                    "artistName": "Artist",
+                                    "title": "Song",
+                                    "media": {},
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+    ],
+)
+def test_sky_radio_malformed_history_is_an_error(payload):
+    with pytest.raises(RadioError):
+        parse_sky_radio_history(payload)
+
+
+def test_sky_radio_fetch_uses_public_graphql_api(mocker):
+    response = mocker.Mock()
+    response.json.return_value = {
+        "data": {
+            "station": {
+                "getPlayouts": {
+                    "playouts": [
+                        {
+                            "broadcastDate": "2026-11-24T10:32:31Z",
+                            "track": {"artistName": "Racoon", "title": "Love You More"},
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    get = mocker.patch.object(radio.requests, "get", return_value=response)
+
+    assert len(radio.fetch_radio_history("sky-radio-90s-hits")) == 1
+
+    get.assert_called_once()
+    args, kwargs = get.call_args
+    assert args == ("https://graph.talparad.io/",)
+    assert kwargs["headers"]["Origin"] == "https://www.skyradio.nl"
+    assert kwargs["headers"]["profile"] == "radio-brand-web"
+    assert kwargs["headers"]["x-api-key"] == radio.SKY_RADIO_API_KEY
+    assert kwargs["timeout"] == 20
+    assert "limit: 100" in kwargs["params"]["query"]
+    assert json.loads(kwargs["params"]["variables"]) == {"slug": "sky-radio-90s-hits"}
 
 
 async def test_nostalgie_fetch_queues_and_downloads_using_spotify_search(

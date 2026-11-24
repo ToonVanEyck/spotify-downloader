@@ -257,9 +257,10 @@ path for successful downloads.
 
 ### Radio monitoring
 
-Open the **Radio monitor** tab to collect songs from the nine stations on
-[nuopderadio.be](https://nuopderadio.be/), plus **Willy** and **Willy Classic**
-through the Willy API and **Nostalgie** through the Mediahuis API.
+Open the **Radio monitor** tab to collect songs from 11 **Sky Radio** stations,
+the nine stations on [nuopderadio.be](https://nuopderadio.be/), **Willy** and
+**Willy Classic** through the Willy API, and **Nostalgie** through the Mediahuis
+API.
 Select stations, enter your Navidrome
 server URL, username, and password, then choose **Test connection & save**.
 The account must be able to search the music library through the Subsonic API.
@@ -284,6 +285,9 @@ Use HTTPS unless the connection stays inside a trusted local network.
   by artist and title. Its timestamps have no timezone, so they are interpreted
   as Brussels local time. Repeated times during the autumn clock change cannot
   be distinguished and are interpreted as the first occurrence.
+- Sky Radio returns its latest 100 playouts through its public GraphQL API.
+  Broadcast timestamps are converted to UTC, and valid Spotify track links are
+  used for metadata when available.
 - Before downloading, spotDL searches Navidrome and compares both artist and
   title, ignoring case, accents, and punctuation. Version names such as "Live"
   remain significant. Matches are shown as **already collected**.

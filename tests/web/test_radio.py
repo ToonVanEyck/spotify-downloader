@@ -52,11 +52,13 @@ async def test_radio_page_lists_stations_without_password(monitor, mocker):
     response = await radio.radio_page(request())
 
     html = response.body.decode()
-    assert html.count('name="stations"') == 12
+    assert html.count('name="stations"') == 23
     assert 'value="willy"' in html
     assert 'value="willy-classic"' in html
     assert 'value="nostalgie"' in html
+    assert 'value="sky-radio-90s-hits"' in html
     assert "https://mediahuis.pointbreak.dev/api/v1/radio/9/tracks-paginated" in html
+    assert "https://graph.talparad.io/" in html
     assert "https://api.willy.radio/" in html
     assert 'href="/radio"' in html
     assert "https://music.example" in html

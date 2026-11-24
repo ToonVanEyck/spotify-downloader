@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
@@ -46,8 +47,41 @@ STATIONS = {
     "willy": "Willy",
     "willy-classic": "Willy Classic",
     "nostalgie": "Nostalgie",
+    "sky-radio": "Sky Radio",
+    "sky-radio-non-stop": "Sky Radio Non-Stop",
+    "sky-radio-hits": "Sky Radio Hits",
+    "sky-radio-non-stop-work": "Sky Radio @Work",
+    "sky-radio-90s-hits": "Sky Radio 00's & 10's",
+    "sky-radio-nice-en-easy": "Sky Radio Top 1000",
+    "sky-radio-80s-hits": "Sky Radio 80s Hits",
+    "sky-radio-lovesongs": "Sky Radio Love Songs",
+    "sky-radio-popup": "Sky Radio Summer Hits",
+    "sky-radio-smooth-hits": "Sky Radio Smooth Hits",
+    "sky-radio-seasonal": "Sky Radio Christmas",
 }
 WILLY_STATIONS = {"willy": "willy_be", "willy-classic": "willy_be_class_x"}
+SKY_RADIO_STATIONS = {
+    station for station in STATIONS if station.startswith("sky-radio")
+}
+SKY_RADIO_API_URL = "https://graph.talparad.io/"
+SKY_RADIO_API_KEY = "da2-abza7qpnqbfe5ihpk4jhcslpgy"
+SKY_RADIO_QUERY = """query GetPlayouts($slug: String!) {
+    station(slug: $slug) {
+        getPlayouts(limit: 10) {
+            playouts {
+                broadcastDate
+                track {
+                    title
+                    artistName
+                    media {
+                        source
+                        uri
+                    }
+                }
+            }
+        }
+    }
+}"""
 PLAYLIST_TIMEZONE = ZoneInfo("Europe/Brussels")
 PLAYLIST_RETRY_INTERVAL = 5 * 60
 
@@ -228,6 +262,73 @@ def parse_nostalgie_history(data: object) -> list[RadioPlay]:
     return plays
 
 
+def parse_sky_radio_history(data: object) -> list[RadioPlay]:
+    """Extract timestamped plays and Spotify links from Sky Radio's GraphQL API."""
+
+    if not isinstance(data, dict):
+        raise RadioError("Sky Radio response is not a JSON object.")
+    response_data = data.get("data")
+    if not isinstance(response_data, dict):
+        raise RadioError("Sky Radio response is missing its data object.")
+    station = response_data.get("station")
+    if not isinstance(station, dict):
+        raise RadioError("Sky Radio response is missing its station.")
+    history = station.get("getPlayouts")
+    if not isinstance(history, dict) or not isinstance(history.get("playouts"), list):
+        raise RadioError("Sky Radio response is missing its playouts list.")
+
+    plays = []
+    for playout in history["playouts"]:
+        if not isinstance(playout, dict):
+            raise RadioError("Invalid Sky Radio playout data.")
+        track = playout.get("track")
+        if not isinstance(track, dict):
+            continue
+        artist, title = track.get("artistName"), track.get("title")
+        if not isinstance(artist, str) or not isinstance(title, str):
+            continue
+        if not artist.strip() or not title.strip():
+            continue
+
+        timestamp = playout.get("broadcastDate")
+        if not isinstance(timestamp, str):
+            raise RadioError("A Sky Radio playout is missing its broadcast timestamp.")
+        try:
+            played = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        except ValueError as exception:
+            raise RadioError("Invalid Sky Radio broadcast timestamp.") from exception
+        if played.tzinfo is None:
+            raise RadioError("A Sky Radio timestamp is missing its timezone.")
+
+        media = track.get("media")
+        if media is None:
+            media = []
+        if not isinstance(media, list):
+            raise RadioError("Invalid Sky Radio track media.")
+        spotify_uri = next(
+            (
+                item.get("uri")
+                for item in media
+                if isinstance(item, dict) and item.get("source") == "spotify_uri"
+            ),
+            "",
+        )
+        match = (
+            re.fullmatch(r"spotify:track:([A-Za-z0-9]{22})", spotify_uri)
+            if isinstance(spotify_uri, str)
+            else None
+        )
+        plays.append(
+            RadioPlay(
+                played.astimezone(timezone.utc).isoformat(),
+                artist.strip(),
+                title.strip(),
+                f"https://open.spotify.com/track/{match[1]}" if match else "",
+            )
+        )
+    return plays
+
+
 def station_url(station: str) -> str:
     """Return a fixed, supported history source URL."""
 
@@ -240,11 +341,31 @@ def station_url(station: str) -> str:
         )
     if station == "nostalgie":
         return "https://mediahuis.pointbreak.dev/api/v1/radio/9/tracks-paginated"
+    if station in SKY_RADIO_STATIONS:
+        return SKY_RADIO_API_URL
     return f"https://nuopderadio.be/{station}/"
 
 
 def fetch_radio_history(station: str) -> list[RadioPlay]:
     """Fetch a supported station's HTML or JSON history."""
+
+    if station in SKY_RADIO_STATIONS:
+        response = requests.get(
+            station_url(station),
+            params={
+                "query": SKY_RADIO_QUERY,
+                "variables": json.dumps({"slug": station}),
+            },
+            headers={
+                "User-Agent": "spotdl-radio-monitor",
+                "Origin": "https://www.skyradio.nl",
+                "profile": "radio-brand-web",
+                "x-api-key": SKY_RADIO_API_KEY,
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+        return parse_sky_radio_history(response.json())
 
     response = requests.get(
         station_url(station),
