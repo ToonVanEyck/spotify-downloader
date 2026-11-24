@@ -2,29 +2,88 @@
     <section aria-labelledby="radio-sources-heading">
         <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
             <h2 id="radio-sources-heading" class="text-lg font-semibold">Source status</h2>
-            <form action="/radio/check" method="post">
-                <button class="btn btn-outline btn-sm" type="submit">Check now</button>
-            </form>
+            <div class="flex flex-wrap items-center gap-2">
+                <form action="/radio/stations" method="post" class="flex items-center gap-2">
+                    <input type="hidden" name="action" value="add">
+                    <label class="sr-only" for="radio-source-select">Radio to add</label>
+                    <select id="radio-source-select" class="select select-sm" name="station"
+                        {% if not available_stations %}disabled{% endif %}>
+                        {% if available_stations %}
+                        <option value="" selected disabled>Select a radio</option>
+                        {% for station in available_stations %}
+                        <option value="{{ station.id|e }}">{{ station.name|e }}</option>
+                        {% endfor %}
+                        {% else %}
+                        <option value="" selected>All radios added</option>
+                        {% endif %}
+                    </select>
+                    <button class="btn btn-primary btn-sm" type="submit"
+                        {% if not available_stations %}disabled{% endif %}>Add radio</button>
+                </form>
+                <form action="/radio/check" method="post">
+                    <button class="btn btn-outline btn-sm" type="submit">Check now</button>
+                </form>
+            </div>
         </div>
         <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-            {% for station in stations %}
-            <article class="rounded-lg border border-base-content/15 bg-base-200 p-4">
+            {% for station in active_stations %}
+            <article class="relative overflow-hidden rounded-lg border border-base-content/15 bg-base-200 p-4">
+                {% if station.id == "sky-radio-seasonal" %}
+                <div class="radio-snow" aria-hidden="true">
+                    {% for flake in range(32) %}
+                    <span style="--x: {{ (flake * 37) % 100 }}%; --size: {{ 2 + (flake % 3) }}px; --duration: {{ 5 + (flake % 6) }}s; --delay: -{{ (flake * 7) % 10 }}s; --drift: {{ (flake % 5 - 2) * 8 }}px"></span>
+                    {% endfor %}
+                </div>
+                {% endif %}
                 <div class="flex items-center justify-between gap-2">
                     <a class="link link-hover font-medium" href="{{ station.url|e }}"
                         target="_blank" rel="noopener noreferrer">{{ station.name|e }}</a>
-                    <span class="badge badge-sm {% if station.enabled %}badge-primary{% else %}badge-ghost{% endif %}">
-                        {{ "Monitoring" if station.enabled else "Paused" }}
-                    </span>
+                    <form action="/radio/stations" method="post">
+                        <input type="hidden" name="action" value="remove">
+                        <input type="hidden" name="station" value="{{ station.id|e }}">
+                        <button class="btn btn-ghost btn-xs text-error" type="submit">Remove</button>
+                    </form>
                 </div>
                 <p class="mt-2 text-xs text-base-content/60">Last check: {{ station.checked|e }}</p>
-                {% if station.enabled %}
                 <p class="mt-1 text-xs text-base-content/60">Next check: {{ station.next_check|e }}</p>
-                {% endif %}
                 {% if station.error %}
                 <p class="mt-2 break-words text-xs text-error" role="alert">{{ station.error|e }}</p>
                 {% endif %}
             </article>
+            {% else %}
+            <p class="rounded-lg border border-dashed border-base-content/20 p-4 text-sm text-base-content/60">
+                No radios added. Choose one above to start monitoring.
+            </p>
             {% endfor %}
+        </div>
+    </section>
+
+    <section aria-labelledby="radio-stats-heading">
+        <h2 id="radio-stats-heading" class="mb-3 text-lg font-semibold">Recent-play statistics</h2>
+        <p class="mb-3 text-xs text-base-content/60">
+            Based on completed outcomes among the latest 300 plays. Queued and in-progress plays are excluded.
+        </p>
+        <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <article class="rounded-lg border border-base-content/15 bg-base-200 p-4">
+                <h3 class="text-sm text-base-content/65">New songs</h3>
+                <p class="mt-1 text-2xl font-semibold" data-text="$radio_stats[$radio_station_filter || 'all'].new_songs">{{ radio_stats.all.new_songs }}</p>
+                <p class="text-xs text-base-content/60"><span data-text="$radio_stats[$radio_station_filter || 'all'].new_percent">{{ radio_stats.all.new_percent }}</span>% of completed plays</p>
+            </article>
+            <article class="rounded-lg border border-base-content/15 bg-base-200 p-4">
+                <h3 class="text-sm text-base-content/65">Already owned</h3>
+                <p class="mt-1 text-2xl font-semibold" data-text="$radio_stats[$radio_station_filter || 'all'].already_owned">{{ radio_stats.all.already_owned }}</p>
+                <p class="text-xs text-base-content/60"><span data-text="$radio_stats[$radio_station_filter || 'all'].already_owned_percent">{{ radio_stats.all.already_owned_percent }}</span>% of completed plays</p>
+            </article>
+            <article class="rounded-lg border border-base-content/15 bg-base-200 p-4">
+                <h3 class="text-sm text-base-content/65">Failed after 6 attempts</h3>
+                <p class="mt-1 text-2xl font-semibold" data-text="$radio_stats[$radio_station_filter || 'all'].failed">{{ radio_stats.all.failed }}</p>
+                <p class="text-xs text-base-content/60"><span data-text="$radio_stats[$radio_station_filter || 'all'].failed_percent">{{ radio_stats.all.failed_percent }}</span>% of completed plays</p>
+            </article>
+            <article class="rounded-lg border border-base-content/15 bg-base-200 p-4">
+                <h3 class="text-sm text-base-content/65">Recovered after retry</h3>
+                <p class="mt-1 text-2xl font-semibold" data-text="$radio_stats[$radio_station_filter || 'all'].recovered_retries">{{ radio_stats.all.recovered_retries }}</p>
+                <p class="text-xs text-base-content/60">New songs downloaded after an initial failure</p>
+            </article>
         </div>
     </section>
 
@@ -45,7 +104,7 @@
             </label>
         </div>
         <p class="mb-3 text-xs text-base-content/60">
-            Latest 300 plays. Initial history is included in library checks and downloads.
+            Latest 300 plays. Each station queues at most its five most recent plays per check.
             Failed tracks get up to five retries after 2, 4, 8, 16, and 32 minutes,
             after normal queued downloads; a later play can be tried again.
             Only the history still visible on the source can be recovered after downtime.
@@ -69,10 +128,12 @@
                             <span class="badge badge-sm whitespace-nowrap {{ {'downloaded': 'badge-success', 'already collected': 'badge-info', 'failed': 'badge-error', 'downloading': 'badge-primary', 'checking': 'badge-warning'}.get(play.status, 'badge-ghost') }}">
                                 {{ play.status|e }}
                             </span>
+                            {% if play.status != 'skipped' %}
                             <p class="mt-1 whitespace-nowrap text-xs text-base-content/60">
                                 {{ "Next attempt" if play.status in ('queued', 'retry') else "Attempt" }}
                                 {{ play.attempt_number }} / {{ max_attempts }}
                             </p>
+                            {% endif %}
                             {% if play.retry_check %}
                             <p class="mt-1 whitespace-nowrap text-xs text-base-content/60">Retry after {{ play.retry_check|e }}</p>
                             {% endif %}
@@ -80,7 +141,7 @@
                     </tr>
                     {% else %}
                     <tr data-show="$radio_station_filter === ''"><td colspan="4" class="py-8 text-center text-base-content/60">
-                        Select stations and save your Navidrome connection to start monitoring.
+                        No recent radio plays.
                     </td></tr>
                     {% endfor %}
                     {% for station in stations %}

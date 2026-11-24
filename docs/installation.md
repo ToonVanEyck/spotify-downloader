@@ -171,15 +171,15 @@ In Unraid, add a container with these settings:
   - `NAVIDROME_PASSWORD`: your Navidrome password
 - Post Arguments: leave blank; the image starts the web server by default
 
-Radio station selections, history, retries, and Navidrome settings are stored in
-`/config/radio.sqlite3`. The appdata mapping preserves them when the container is
-updated or recreated. No separate JSON configuration file is needed.
-Environment credentials override saved credentials on every startup, without
-changing selected stations. Without those variables, saved credentials are used.
-The server need not be reachable during startup; library checks report connection
-errors and prevent downloads as usual.
+Radio station selections, history, retries, and Navidrome credentials are stored
+in `/config/radio.sqlite3`. The appdata mapping preserves them when the
+container is updated or recreated. Configure Navidrome credentials with the
+three environment variables above; they are not entered in the web UI. No
+separate JSON configuration file is needed. The server need not be reachable
+during startup; library checks report connection errors and prevent downloads
+as usual.
 
-Both the database and Unraid's environment-variable configuration contain the
+The database and Unraid's environment-variable configuration contain the
 password unencrypted. Protect appdata, backups, and access to container settings.
 Ensure the appdata directory is writable by the container's UID/GID.
 When upgrading an existing container, copy its old `radio.sqlite3` from the spotDL

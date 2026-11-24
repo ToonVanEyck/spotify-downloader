@@ -4,14 +4,12 @@ import asyncio
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
 
 from datastar_py.fastapi import ServerSentEventGenerator as SSE
 from fastapi import APIRouter, FastAPI, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
 from spotdl.utils.config import get_spotdl_path
-from spotdl.utils.navidrome import NavidromeError
 from spotdl.utils.radio import RadioMonitor
 from spotdl.utils.web import app_state
 from spotdl.web.routes import templates
@@ -68,34 +66,32 @@ async def radio_page(request: Request):
     )
 
 
-@router.post("/radio/settings")
-async def save_settings(
+@router.post("/radio/stations")
+async def update_station(
     request: Request,
-    stations: Optional[list[str]] = Form(default=None),
-    navidrome_url: str = Form(default=""),
-    navidrome_username: str = Form(default=""),
-    navidrome_password: str = Form(default=""),
+    station: str = Form(),
+    action: str = Form(),
 ):
-    """Save selected stations only after the Navidrome connection is validated."""
+    """Add or remove one monitored radio source."""
 
     check_origin(request)
     monitor = get_monitor()
     try:
-        await monitor.configure(
-            stations or [], navidrome_url, navidrome_username, navidrome_password
-        )
-    except (ValueError, NavidromeError) as exception:
-        app_state.logger.warning("Radio settings not saved: %s", exception)
-        monitor.append_log(f"ERROR Settings not saved: {exception}")
+        if action == "add":
+            monitor.add_station(station)
+        elif action == "remove":
+            monitor.remove_station(station)
+        else:
+            raise ValueError("Unknown radio source action.")
+    except ValueError as exception:
+        app_state.logger.warning("Radio source not updated: %s", exception)
+        monitor.append_log(f"ERROR Radio source not updated: {exception}")
         context = monitor.view()
         context["error"] = str(exception)
-        context["selected_stations"] = stations or []
-        context["navidrome_url"] = navidrome_url.strip()
-        context["navidrome_username"] = navidrome_username.strip()
         return templates.TemplateResponse(
             request=request, name="radio.html.j2", context=context, status_code=400
         )
-    return RedirectResponse("/radio?saved=1", status_code=303)
+    return RedirectResponse(f"/radio?{action}=1", status_code=303)
 
 
 @router.post("/radio/check")
@@ -115,6 +111,7 @@ async def updates():
     monitor = get_monitor()
     previous = None
     previous_stations = None
+    previous_stats = None
     while True:
         context = monitor.view()
         rendered = templates.get_template("radio-status.html.j2").render(**context)
@@ -131,4 +128,7 @@ async def updates():
                 }
             )
             previous_stations = context["selected_stations"]
+        if context["radio_stats"] != previous_stats:
+            yield SSE.patch_signals({"radio_stats": context["radio_stats"]})
+            previous_stats = context["radio_stats"]
         await asyncio.sleep(2)

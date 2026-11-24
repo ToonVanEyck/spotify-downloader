@@ -44,7 +44,7 @@ def request(path="/radio", origin=None):
     )
 
 
-async def test_radio_page_lists_stations_without_password(monitor, mocker):
+async def test_radio_page_lists_radios_without_library_credentials(monitor, mocker):
     mocker.patch.object(Navidrome, "ping")
     await monitor.configure(
         ["stubru"], "https://music.example", "user", "test-password"
@@ -52,16 +52,17 @@ async def test_radio_page_lists_stations_without_password(monitor, mocker):
     response = await radio.radio_page(request())
 
     html = response.body.decode()
-    assert html.count('name="stations"') == 23
+    assert 'action="/radio/stations"' in html
+    assert 'name="action" value="add"' in html
     assert 'value="willy"' in html
     assert 'value="willy-classic"' in html
     assert 'value="nostalgie"' in html
     assert 'value="sky-radio-90s-hits"' in html
-    assert "https://mediahuis.pointbreak.dev/api/v1/radio/9/tracks-paginated" in html
-    assert "https://graph.talparad.io/" in html
-    assert "https://api.willy.radio/" in html
     assert 'href="/radio"' in html
-    assert "https://music.example" in html
+    assert "Stations to monitor" not in html
+
+    assert 'name="navidrome_' not in html
+    assert "https://music.example" not in html
     assert "test-password" not in html
     assert "once every 10 minutes" in html
     assert "2, 4, 8, 16, and 32 minutes" in html
@@ -69,23 +70,14 @@ async def test_radio_page_lists_stations_without_password(monitor, mocker):
     assert "Nightly Navidrome playlists" not in html
 
 
-async def test_settings_validate_and_redirect(monitor, mocker):
-    ping = mocker.patch.object(Navidrome, "ping")
+async def test_add_and_remove_radio_redirect_and_preserve_history(monitor):
     app = FastAPI()
     app.include_router(radio.router)
     status, headers, _ = await call_asgi(
         app,
-        "/radio/settings",
+        "/radio/stations",
         method="POST",
-        request_body=urlencode(
-            [
-                ("stations", "stubru"),
-                ("stations", "radio1"),
-                ("navidrome_url", "https://music.example"),
-                ("navidrome_username", "user"),
-                ("navidrome_password", "test-password"),
-            ]
-        ).encode(),
+        request_body=urlencode({"station": "stubru", "action": "add"}).encode(),
         request_headers=(
             (b"host", b"localhost:8800"),
             (b"origin", b"http://localhost:8800"),
@@ -94,46 +86,61 @@ async def test_settings_validate_and_redirect(monitor, mocker):
     )
 
     assert status == 303
-    assert headers[b"location"] == b"/radio?saved=1"
-    ping.assert_called_once()
+    assert headers[b"location"] == b"/radio?add=1"
     assert monitor.wake.is_set()
-    assert {
-        station["id"] for station in monitor.view()["stations"] if station["enabled"]
-    } == {"stubru", "radio1"}
+    assert monitor.view()["selected_stations"] == ["stubru"]
+    with monitor.db:
+        monitor.db.execute(
+            """INSERT INTO plays
+            (station, played_at, artist, title, spotify_url, song_key, status)
+            VALUES ('stubru', '2026-11-23T12:00:00+00:00', 'Artist', 'Song', '', 'key', 'queued')"""
+        )
+
+    status, headers, _ = await call_asgi(
+        app,
+        "/radio/stations",
+        method="POST",
+        request_body=urlencode({"station": "stubru", "action": "remove"}).encode(),
+        request_headers=(
+            (b"host", b"localhost:8800"),
+            (b"origin", b"http://localhost:8800"),
+            (b"content-type", b"application/x-www-form-urlencoded"),
+        ),
+    )
+    assert status == 303
+    assert headers[b"location"] == b"/radio?remove=1"
+    assert monitor.view()["selected_stations"] == []
+    assert monitor.view()["plays"][0]["title"] == "Song"
 
 
-async def test_cross_origin_settings_are_rejected(monitor):
+async def test_cross_origin_radio_changes_are_rejected(monitor):
     with pytest.raises(HTTPException) as error:
-        await radio.save_settings(
-            request("/radio/settings", "https://other.example"),
-            [],
-            "",
-            "",
-            "",
+        await radio.update_station(
+            request("/radio/stations", "https://other.example"), "stubru", "add"
         )
     assert error.value.status_code == 403
 
 
-async def test_invalid_settings_preserve_non_secret_form_values(monitor, mocker):
-    ping = mocker.patch.object(
-        Navidrome, "ping", side_effect=ValueError("Invalid connection")
-    )
-    response = await radio.save_settings(
-        request("/radio/settings"),
-        ["stubru"],
-        "https://music.example",
-        "user",
-        "test-password",
-    )
-
+async def test_invalid_radio_action_is_reported(monitor):
+    response = await radio.update_station(request("/radio/stations"), "unknown", "add")
     assert response.status_code == 400
-    ping.assert_called_once()
     html = response.body.decode()
-    assert 'value="https://music.example"' in html
-    assert 'value="user"' in html
-    assert 'value="stubru" checked' in html
-    assert "test-password" not in html
-    assert not any(station["enabled"] for station in monitor.view()["stations"])
+    assert "Unknown radio station." in html
+    assert not monitor.view()["selected_stations"]
+
+
+async def test_snow_is_confined_to_christmas_station_card(monitor):
+    monitor.add_station("sky-radio-seasonal")
+    monitor.add_station("sky-radio")
+    response = await radio.radio_page(request())
+    page = BeautifulSoup(response.body, "html.parser")
+    christmas = page.select_one('input[name="station"][value="sky-radio-seasonal"]')
+    regular = page.select_one('input[name="station"][value="sky-radio"]')
+    snow = christmas.find_parent("article").select_one(".radio-snow")
+    assert snow["aria-hidden"] == "true"
+    assert len(snow.select("span")) == 32
+    assert not regular.find_parent("article").select(".radio-snow")
+    assert "prefers-reduced-motion: reduce" in str(page)
 
 
 async def test_live_output_escapes_upstream_content(monitor):
@@ -176,12 +183,74 @@ async def test_radio_station_filter_lists_only_monitored_stations(monitor):
     assert "No recent plays for Radio 1." not in page.get_text()
 
 
+async def test_radio_statistics_are_filtered_and_ignore_unfinished_plays(monitor):
+    with monitor.db:
+        monitor.db.executemany(
+            """INSERT INTO plays
+            (station, played_at, artist, title, spotify_url, song_key, status, attempts)
+            VALUES (?, ?, 'Artist', ?, '', ?, ?, ?)""",
+            [
+                ("stubru", "2026-11-23T12:04:00+00:00", "New", "new", "downloaded", 1),
+                (
+                    "stubru",
+                    "2026-11-23T12:03:00+00:00",
+                    "Owned",
+                    "owned",
+                    "already collected",
+                    0,
+                ),
+                (
+                    "radio1",
+                    "2026-11-23T12:02:00+00:00",
+                    "Failed",
+                    "failed",
+                    "failed",
+                    6,
+                ),
+                (
+                    "stubru",
+                    "2026-11-23T12:01:00+00:00",
+                    "Queued",
+                    "queued",
+                    "queued",
+                    0,
+                ),
+            ],
+        )
+
+    stats = monitor.view()["radio_stats"]
+    assert stats["all"] == {
+        "new_songs": 1,
+        "already_owned": 1,
+        "failed": 1,
+        "recovered_retries": 1,
+        "new_percent": 33.3,
+        "already_owned_percent": 33.3,
+        "failed_percent": 33.3,
+    }
+    assert stats["stubru"] == {
+        "new_songs": 1,
+        "already_owned": 1,
+        "failed": 0,
+        "recovered_retries": 1,
+        "new_percent": 50.0,
+        "already_owned_percent": 50.0,
+        "failed_percent": 0.0,
+    }
+
+    response = await radio.radio_page(request())
+    page = BeautifulSoup(response.body, "html.parser")
+    assert "$radio_stats[$radio_station_filter || 'all'].new_songs" in str(page)
+    assert "Based on completed outcomes among the latest 300 plays" in page.get_text()
+
+
 async def test_radio_updates_send_enabled_stations(monitor):
     response = await radio.updates()
     stream = response.body_iterator
     try:
         await anext(stream)
         assert '"radio_enabled_stations":"||"' in await anext(stream)
+        assert '"radio_stats":' in await anext(stream)
         with monitor.db:
             monitor.db.execute("UPDATE stations SET enabled=1 WHERE id='stubru'")
         await anext(stream)

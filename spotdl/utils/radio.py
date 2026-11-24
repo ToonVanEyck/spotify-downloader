@@ -19,6 +19,9 @@ from zoneinfo import ZoneInfo
 
 import requests
 from bs4 import BeautifulSoup
+from mutagen._file import File
+from mutagen.id3 import TCON
+from mutagen.wave import WAVE
 from rapidfuzz.fuzz import ratio
 
 from spotdl.download.downloader import Downloader
@@ -32,6 +35,7 @@ from spotdl.utils.web import get_web_download_output
 logger = logging.getLogger(__name__)
 
 POLL_INTERVAL = 10 * 60
+MAX_QUEUED_PLAYS = 5
 DOWNLOAD_RETRIES = 5
 DOWNLOAD_RETRY_INTERVAL = 2 * 60
 STATIONS = {
@@ -67,7 +71,7 @@ SKY_RADIO_API_URL = "https://graph.talparad.io/"
 SKY_RADIO_API_KEY = "da2-abza7qpnqbfe5ihpk4jhcslpgy"
 SKY_RADIO_QUERY = """query GetPlayouts($slug: String!) {
     station(slug: $slug) {
-        getPlayouts(limit: 10) {
+        getPlayouts(limit: 100) {
             playouts {
                 broadcastDate
                 track {
@@ -395,6 +399,47 @@ def playlist_window(now: datetime) -> tuple[datetime, datetime, datetime]:
     )
 
 
+def _play_statistics(plays: list[sqlite3.Row]) -> dict[str, int | float]:
+    """Summarize terminal outcomes for recent radio plays."""
+
+    new_songs = sum(play["status"] == "downloaded" for play in plays)
+    already_owned = sum(play["status"] == "already collected" for play in plays)
+    failed = sum(play["status"] == "failed" for play in plays)
+    completed = new_songs + already_owned + failed
+    recovered_retries = sum(
+        play["status"] == "downloaded" and play["attempts"] > 0 for play in plays
+    )
+
+    def percentage(count: int) -> float:
+        return round(count * 100 / completed, 1) if completed else 0
+
+    return {
+        "new_songs": new_songs,
+        "already_owned": already_owned,
+        "failed": failed,
+        "recovered_retries": recovered_retries,
+        "new_percent": percentage(new_songs),
+        "already_owned_percent": percentage(already_owned),
+        "failed_percent": percentage(failed),
+    }
+
+
+def _tag_christmas_genre(path: Path) -> None:
+    """Set the Christmas genre without changing the file's other tags."""
+
+    extension = path.suffix.lower()
+    audio = File(path, easy=extension == ".mp3")
+    if audio is None:
+        raise RadioError(f"Unable to read audio metadata from {path}.")
+    if audio.tags is None:
+        audio.add_tags()
+    if isinstance(audio, WAVE):
+        audio.tags.add(TCON(encoding=3, text=["Christmas Music"]))
+    else:
+        audio["\xa9gen" if extension == ".m4a" else "genre"] = "Christmas Music"
+    audio.save()
+
+
 class RadioMonitor:
     """Keep polling and downloading independently of browser/client sessions."""
 
@@ -455,6 +500,18 @@ class RadioMonitor:
             """UPDATE plays SET status=CASE WHEN attempts > 0 THEN 'retry'
             ELSE 'queued' END WHERE status IN ('baseline', 'checking', 'downloading')"""
         )
+        self.db.execute(
+            """UPDATE plays SET status='skipped', message=?
+            WHERE id IN (
+                SELECT id FROM (
+                    SELECT id, ROW_NUMBER() OVER (
+                        PARTITION BY station ORDER BY played_at DESC, id DESC
+                    ) AS position
+                    FROM plays WHERE status='queued' AND attempts=0
+                ) WHERE position > ?
+            )""",
+            ("Skipped: only the five most recent plays are queued.", MAX_QUEUED_PLAYS),
+        )
         if "retry_at" not in columns:
             self.db.execute(
                 "ALTER TABLE plays ADD COLUMN retry_at REAL NOT NULL DEFAULT 0"
@@ -496,7 +553,6 @@ class RadioMonitor:
     def view(self) -> dict:
         """Return public configuration and recent activity, never the password."""
 
-        configuration = self.db.execute("SELECT * FROM settings WHERE id=1").fetchone()
         stations = []
         for row in self.db.execute("SELECT * FROM stations"):
             station = dict(row)
@@ -518,6 +574,8 @@ class RadioMonitor:
                 else "On enabling"
             )
             stations.append(station)
+        active_stations = [station for station in stations if station["enabled"]]
+        available_stations = [station for station in stations if not station["enabled"]]
         with self.log_lock:
             output = "\n".join(self.logs)
         playlists = dict(
@@ -531,11 +589,13 @@ class RadioMonitor:
         playlists["next_check"] = next_run.astimezone(PLAYLIST_TIMEZONE).strftime(
             "%Y-%m-%d %H:%M %Z"
         )
-        plays = []
-        for row in self.db.execute(
+        play_rows = self.db.execute(
             "SELECT * FROM plays ORDER BY played_at DESC, id DESC LIMIT 300"
-        ):
+        ).fetchall()
+        plays = []
+        for row in play_rows:
             play = dict(row)
+            play["station_name"] = STATIONS[row["station"]]
             play["attempt_number"] = row["attempts"] + (row["status"] != "failed")
             play["retry_check"] = (
                 datetime.fromtimestamp(row["retry_at"], timezone.utc).strftime(
@@ -545,16 +605,25 @@ class RadioMonitor:
                 else ""
             )
             plays.append(play)
+        radio_stats = {"all": _play_statistics(play_rows)}
+        radio_stats.update(
+            {
+                station: _play_statistics(
+                    [play for play in play_rows if play["station"] == station]
+                )
+                for station in STATIONS
+            }
+        )
         return {
             "stations": stations,
+            "active_stations": active_stations,
+            "available_stations": available_stations,
             "selected_stations": [
                 station["id"] for station in stations if station["enabled"]
             ],
-            "navidrome_url": configuration["url"],
-            "navidrome_username": configuration["username"],
-            "password_saved": bool(configuration["password"]),
             "output_directory": self.settings["output"],
             "plays": plays,
+            "radio_stats": radio_stats,
             "max_attempts": DOWNLOAD_RETRIES + 1,
             "output": output,
             "playlists": playlists,
@@ -565,7 +634,10 @@ class RadioMonitor:
 
         connection = self.optional_navidrome()
         if connection is None:
-            raise ValueError("Configure Navidrome on the Radio monitor page.")
+            raise ValueError(
+                "Set NAVIDROME_URL, NAVIDROME_USERNAME and "
+                "NAVIDROME_PASSWORD in the server environment."
+            )
         return connection
 
     def optional_navidrome(self) -> Optional[Navidrome]:
@@ -575,6 +647,42 @@ class RadioMonitor:
         if not any(row[key] for key in ("url", "username", "password")):
             return None
         return Navidrome(row["url"], row["username"], row["password"])
+
+    def add_station(self, station: str) -> None:
+        """Enable a supported source and make its first history check available."""
+
+        if station not in STATIONS:
+            raise ValueError("Unknown radio station.")
+        row = self.db.execute(
+            "SELECT enabled FROM stations WHERE id=?", (station,)
+        ).fetchone()
+        if row is None:
+            raise ValueError("Unknown radio station.")
+        if row["enabled"]:
+            raise ValueError("Radio source is already added.")
+        with self.db:
+            self.db.execute(
+                """UPDATE stations SET enabled=1, initialized=0, checked_at=0, error=''
+                WHERE id=?""",
+                (station,),
+            )
+        self.append_log(f"[{STATIONS[station]}] Radio source added.")
+        self.check_now()
+
+    def remove_station(self, station: str) -> None:
+        """Stop monitoring a source while retaining its play history."""
+
+        if station not in STATIONS:
+            raise ValueError("Unknown radio station.")
+        row = self.db.execute(
+            "SELECT enabled FROM stations WHERE id=?", (station,)
+        ).fetchone()
+        if row is None or not row["enabled"]:
+            raise ValueError("Radio source is not currently added.")
+        with self.db:
+            self.db.execute("UPDATE stations SET enabled=0 WHERE id=?", (station,))
+        self.append_log(f"[{STATIONS[station]}] Radio source removed.")
+        self.check_now()
 
     async def configure(
         self, stations: list[str], url: str, username: str, password: str
@@ -668,13 +776,23 @@ class RadioMonitor:
         self.db.close()
 
     async def poll_station(self, station: str) -> None:
-        """Queue unseen plays, including the first fetched history."""
+        """Queue at most the five most recent plays from a source."""
 
         self.append_log(f"[{STATIONS[station]}] Fetching radio history...")
-        plays = await asyncio.to_thread(fetch_radio_history, station)
+        history = await asyncio.to_thread(fetch_radio_history, station)
+        plays = sorted(history, key=lambda play: play.played_at, reverse=True)[
+            :MAX_QUEUED_PLAYS
+        ]
         added = 0
         with self.db:
-            for play in reversed(plays):
+            pending = self.db.execute(
+                """SELECT COUNT(*) FROM plays WHERE station=? AND attempts=0
+                AND status IN ('queued', 'checking', 'downloading')""",
+                (station,),
+            ).fetchone()[0]
+            for play in plays:
+                if pending >= MAX_QUEUED_PLAYS:
+                    break
                 cursor = self.db.execute(
                     """INSERT OR IGNORE INTO plays
                     (station, played_at, artist, title, spotify_url, song_key, status, youtube_url)
@@ -691,6 +809,7 @@ class RadioMonitor:
                     ),
                 )
                 added += cursor.rowcount
+                pending += cursor.rowcount
             self.db.execute(
                 "UPDATE stations SET initialized=1, checked_at=?, error='' WHERE id=?",
                 (time.time(), station),
@@ -824,6 +943,8 @@ class RadioMonitor:
             self.set_status(row["id"], "downloading")
             with capture_web_output(self.append_log):
                 path = await self.download(play)
+                if row["station"] == "sky-radio-seasonal":
+                    await asyncio.to_thread(_tag_christmas_genre, path)
             with self.db:
                 self.db.execute(
                     "INSERT OR REPLACE INTO collected VALUES (?, ?)",

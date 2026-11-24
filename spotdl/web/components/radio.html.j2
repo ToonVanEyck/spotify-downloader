@@ -1,79 +1,61 @@
 {% extends "base.html.j2" %}
 
 {% block content %}
+<style>
+    .radio-snow {
+        position: absolute;
+        inset: 0;
+        overflow: hidden;
+        pointer-events: none;
+    }
+    .radio-snow span {
+        position: absolute;
+        top: 0;
+        left: var(--x);
+        width: 0;
+        height: 100%;
+        animation: radio-snowfall var(--duration) linear var(--delay) infinite;
+    }
+    .radio-snow span::before {
+        content: "";
+        display: block;
+        width: var(--size);
+        height: var(--size);
+        border-radius: 50%;
+        background: white;
+        box-shadow: 0 0 2px #718096;
+        opacity: .7;
+    }
+    @keyframes radio-snowfall {
+        from { transform: translate(0, -8px); }
+        to { transform: translate(var(--drift), 100%); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+        .radio-snow { display: none; }
+    }
+</style>
 <div class="mx-auto max-w-screen-2xl space-y-8 px-4 py-8 sm:px-6 lg:px-8">
     <header>
         <h1 class="text-2xl font-semibold">Radio monitor</h1>
         <p class="mt-2 max-w-3xl text-sm text-base-content/65">
-            Follow songs from Sky Radio, nuopderadio.be, Willy, Willy Classic, and Nostalgie.
-            Each selected station refills when its new-song queue is empty, at most once every 10 minutes,
-            even with this tab closed, while the spotDL server is running.
-            Retries do not block refills, even while processing.
-            The first check includes the existing history. Every song is checked against Navidrome before downloading.
-            spotDL searches for audio using Spotify metadata instead of the station's video links.
+            Add the radios you want to monitor in Source status. Each source checks for new
+            plays at most once every 10 minutes while the spotDL server is running.
+            Navidrome library checks use the server's NAVIDROME_URL, NAVIDROME_USERNAME,
+            and NAVIDROME_PASSWORD environment variables.
         </p>
     </header>
 
     {% if error %}
     <div class="alert alert-error" role="alert">{{ error|e }}</div>
-    {% elif request.query_params.get("saved") %}
-    <div class="alert alert-success" role="status">Settings saved. Empty new-song queues will refresh when their 10-minute limit allows.</div>
+    {% elif request.query_params.get("added") %}
+    <div class="alert alert-success" role="status">Radio added. Its five most recent plays will be checked when its queue allows.</div>
+    {% elif request.query_params.get("removed") %}
+    <div class="alert alert-success" role="status">Radio removed. Its history has been kept.</div>
     {% elif request.query_params.get("checking") %}
-    <div class="alert alert-info" role="status">Refresh requested for empty new-song queues, respecting each station's 10-minute limit. Retry deadlines are unchanged.</div>
+    <div class="alert alert-info" role="status">Refresh requested for empty new-song queues, respecting each source's 10-minute limit. Retry deadlines are unchanged.</div>
     {% endif %}
 
-    <form action="/radio/settings" method="post" class="grid gap-6 lg:grid-cols-2">
-        <fieldset class="rounded-lg border border-base-content/15 bg-base-200 p-5">
-            <legend class="px-2 text-lg font-semibold">Stations to monitor</legend>
-            <div class="grid gap-3 sm:grid-cols-2">
-                {% for station in stations %}
-                <label class="flex cursor-pointer items-center gap-3 rounded-md bg-base-100 p-3">
-                    <input type="checkbox" class="checkbox checkbox-primary checkbox-sm"
-                        name="stations" value="{{ station.id|e }}" {% if station.id in selected_stations %}checked{% endif %}>
-                    <span>{{ station.name|e }}</span>
-                </label>
-                {% endfor %}
-            </div>
-            <p class="mt-4 text-xs text-base-content/60">
-                Deselect all stations to pause. An already-running download may finish.
-                Re-enabling a station resumes queued songs. Its history refreshes when the new-song queue empties and the 10-minute limit allows.
-            </p>
-        </fieldset>
-
-        <fieldset class="space-y-4 rounded-lg border border-base-content/15 bg-base-200 p-5">
-            <legend class="px-2 text-lg font-semibold">Navidrome library</legend>
-            <p class="text-sm text-base-content/65">
-                Songs already in your library are marked <strong>already collected</strong>.
-                A failed library check blocks the download.
-            </p>
-            <label class="block text-sm">
-                Server URL
-                <input class="input mt-1 w-full" type="url" name="navidrome_url"
-                    placeholder="http://navidrome:4533" value="{{ navidrome_url|e }}">
-            </label>
-            <label class="block text-sm">
-                Username
-                <input class="input mt-1 w-full" name="navidrome_username"
-                    autocomplete="username" value="{{ navidrome_username|e }}">
-            </label>
-            <label class="block text-sm">
-                Password
-                <input class="input mt-1 w-full" type="password" name="navidrome_password"
-                    autocomplete="new-password"
-                    placeholder="{% if password_saved %}Saved; leave blank to keep it{% else %}Navidrome password{% endif %}">
-            </label>
-            <p class="text-xs text-base-content/60">
-                Save tests the connection first. Credentials are stored only on this server in a
-                private database and are never included in the live stream.
-                Changing the server URL or username requires entering the password again.
-                Use HTTPS outside a trusted local network. These are server-wide settings;
-                use the app only on a trusted network.
-            </p>
-            <button type="submit" class="btn btn-primary">Test connection &amp; save</button>
-        </fieldset>
-    </form>
-
-    <div data-signals='{"radio_station_filter": "", "radio_enabled_stations": {{ ('|' ~ selected_stations|join('|') ~ '|')|tojson }}}'
+    <div data-signals='{"radio_station_filter": "", "radio_enabled_stations": {{ ('|' ~ selected_stations|join('|') ~ '|')|tojson }}, "radio_stats": {{ radio_stats|tojson|forceescape }}}'
         data-effect="$radio_station_filter && !$radio_enabled_stations.includes('|' + $radio_station_filter + '|') && ($radio_station_filter = '')"
         data-on-load="@get('/radio/updates')">
         {% include "radio-status.html.j2" %}

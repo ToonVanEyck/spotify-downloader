@@ -1,9 +1,12 @@
 import asyncio
 import json
+import wave
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
+from mutagen.id3 import TIT2
+from mutagen.wave import WAVE
 
 from spotdl.types.options import DownloaderOptions
 from spotdl.utils import radio
@@ -439,6 +442,96 @@ async def test_first_history_and_only_unseen_plays_are_queued(monitor, monkeypat
     ]
 
 
+@pytest.mark.parametrize("station", ["stubru", "sky-radio-seasonal"])
+async def test_poll_queues_only_five_most_recent_plays(monitor, monkeypatch, station):
+    history = [play(f"Song {minute}", minute) for minute in [1, 7, 4, 0, 6, 2, 5, 3]]
+    monkeypatch.setattr(radio, "fetch_radio_history", lambda _: history)
+
+    await monitor.poll_station(station)
+    await monitor.poll_station(station)
+
+    assert [row["title"] for row in monitor.view()["plays"]] == [
+        "Song 7",
+        "Song 6",
+        "Song 5",
+        "Song 4",
+        "Song 3",
+    ]
+
+
+async def test_pending_plays_cap_is_per_station_and_excludes_retries(
+    monitor, monkeypatch
+):
+    for minute in range(4):
+        queue_play(monitor, "stubru", play(f"Existing {minute}", minute))
+    retry = queue_play(monitor, "stubru", play("Retry", 10))
+    with monitor.db:
+        monitor.db.execute(
+            "UPDATE plays SET status='retry', attempts=1 WHERE id=?", (retry["id"],)
+        )
+    history = [play(f"New {minute}", minute) for minute in range(20, 27)]
+    monkeypatch.setattr(radio, "fetch_radio_history", lambda _: history)
+
+    await monitor.poll_station("stubru")
+    await monitor.poll_station("radio1")
+
+    rows = monitor.db.execute(
+        "SELECT station, status, title FROM plays ORDER BY played_at DESC"
+    ).fetchall()
+    assert [row["title"] for row in rows if row["station"] == "stubru"] == [
+        "New 26",
+        "Retry",
+        "Existing 3",
+        "Existing 2",
+        "Existing 1",
+        "Existing 0",
+    ]
+    assert sum(row["station"] == "radio1" for row in rows) == 5
+
+
+async def test_restart_limits_old_backlogs_without_deleting_history(monitor, tmp_path):
+    for station in ["stubru", "radio1"]:
+        for minute in range(7):
+            queue_play(monitor, station, play(f"Song {minute}", minute))
+    with monitor.db:
+        monitor.db.execute(
+            "UPDATE plays SET status='retry', attempts=2 WHERE station='stubru' AND title='Song 0'"
+        )
+    resumed = RadioMonitor(
+        tmp_path / "radio.sqlite3", DownloaderOptions(**DOWNLOADER_OPTIONS)
+    )
+    try:
+        rows = resumed.db.execute(
+            "SELECT station, title, status FROM plays ORDER BY played_at DESC"
+        ).fetchall()
+        for station in ["stubru", "radio1"]:
+            queued = [
+                row["title"]
+                for row in rows
+                if row["station"] == station and row["status"] == "queued"
+            ]
+            assert queued == [f"Song {minute}" for minute in range(6, 1, -1)]
+        assert len(rows) == 14
+        assert (
+            next(
+                row
+                for row in rows
+                if row["station"] == "stubru" and row["title"] == "Song 0"
+            )["status"]
+            == "retry"
+        )
+        assert (
+            next(
+                row
+                for row in rows
+                if row["station"] == "radio1" and row["title"] == "Song 0"
+            )["status"]
+            == "skipped"
+        )
+    finally:
+        resumed.db.close()
+
+
 async def test_seen_history_and_queue_survive_restart(monitor, tmp_path, monkeypatch):
     enable(monitor, "stubru")
     history = [play()]
@@ -503,18 +596,64 @@ async def test_first_history_checks_navidrome_before_downloading(
         download.assert_awaited_once()
 
 
-async def test_existing_song_is_already_collected(monitor, mocker):
+@pytest.mark.parametrize("station", ["stubru", "sky-radio-seasonal"])
+async def test_existing_song_is_already_collected(monitor, mocker, station):
     connection = mocker.Mock()
     connection.contains.return_value = True
     mocker.patch.object(monitor, "navidrome", return_value=connection)
     download = mocker.patch.object(monitor, "download")
-    row = queue_play(monitor)
+    row = queue_play(monitor, station)
 
     await monitor.process_play(row)
 
     assert monitor.view()["plays"][0]["status"] == "already collected"
     connection.contains.assert_called_once_with("Artist", "Song")
     download.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("station", "expected_genre"),
+    [("sky-radio-seasonal", "Christmas Music"), ("sky-radio", "Original Genre")],
+)
+async def test_christmas_station_tags_only_its_downloads(
+    monitor, tmp_path, mocker, station, expected_genre
+):
+    audio = tmp_path / "song.wav"
+    with wave.open(str(audio), "wb") as stream:
+        stream.setnchannels(1)
+        stream.setsampwidth(2)
+        stream.setframerate(8000)
+        stream.writeframes(b"\0\0" * 800)
+    tagged = WAVE(audio)
+    tagged.add_tags()
+    tagged.tags.add(radio.TCON(encoding=3, text=["Original Genre"]))
+    tagged.tags.add(TIT2(encoding=3, text=["Existing title"]))
+    tagged.save()
+    enable(monitor, station)
+    connection = mocker.Mock()
+    connection.contains.return_value = False
+    mocker.patch.object(monitor, "navidrome", return_value=connection)
+    mocker.patch.object(monitor, "download", return_value=audio)
+
+    await monitor.process_play(queue_play(monitor, station))
+
+    tagged = WAVE(audio)
+    assert tagged.tags["TCON"].text == [expected_genre]
+    assert tagged.tags["TIT2"].text == ["Existing title"]
+    assert monitor.view()["plays"][0]["status"] == "downloaded"
+
+
+async def test_christmas_tag_failure_is_retried(monitor, tmp_path, mocker):
+    enable(monitor, "sky-radio-seasonal")
+    connection = mocker.Mock()
+    connection.contains.return_value = False
+    mocker.patch.object(monitor, "navidrome", return_value=connection)
+    mocker.patch.object(monitor, "download", return_value=tmp_path / "invalid.wav")
+
+    await monitor.process_play(queue_play(monitor, "sky-radio-seasonal"))
+
+    assert monitor.view()["plays"][0]["status"] == "retry"
+    assert not monitor.db.execute("SELECT * FROM collected").fetchall()
 
 
 async def test_library_failure_blocks_download_and_can_be_retried(monitor, mocker):
@@ -835,7 +974,7 @@ async def test_failed_connection_does_not_replace_saved_settings(monitor, mocker
     assert [station["id"] for station in state["stations"] if station["enabled"]] == [
         "stubru"
     ]
-    assert state["navidrome_url"] == "https://music.example"
+    assert monitor.optional_navidrome().url == "https://music.example"
     assert "test-password" not in repr(state)
 
 

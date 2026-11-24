@@ -245,11 +245,12 @@ download lists and terminal output; files are no longer stored in per-tab
 session directories. Existing files in old locations are not moved automatically.
 To use the server's `--output` setting instead, add `--web-use-output-dir`.
 
-Regular web downloads also use the Navidrome connection saved on the **Radio
-monitor** page, even if no stations are selected. Each song is checked before
+Regular web downloads also use the Navidrome connection configured through the
+`NAVIDROME_URL`, `NAVIDROME_USERNAME`, and `NAVIDROME_PASSWORD` environment
+variables, even if no stations are monitored. Each song is checked before
 downloading; matches show **Already collected** instead of a download link.
 Library/authentication errors fail the track and appear in the terminal without
-starting a download. If Navidrome has never been configured, regular downloads
+starting a download. If Navidrome has not been configured, regular downloads
 still work and the terminal explicitly warns that the library check was skipped.
 The `/api/download/url` endpoint returns
 `{"status": "already collected", "song": "..."}` for matches, and the usual file
@@ -261,22 +262,28 @@ Open the **Radio monitor** tab to collect songs from 11 **Sky Radio** stations,
 the nine stations on [nuopderadio.be](https://nuopderadio.be/), **Willy** and
 **Willy Classic** through the Willy API, and **Nostalgie** through the Mediahuis
 API.
-Select stations, enter your Navidrome
-server URL, username, and password, then choose **Test connection & save**.
-The account must be able to search the music library through the Subsonic API.
-Use HTTPS unless the connection stays inside a trusted local network.
+Use **Add radio** in **Source status** to start monitoring a station; use its
+**Remove** button to stop monitoring it without deleting its history. Configure
+Navidrome by setting `NAVIDROME_URL`, `NAVIDROME_USERNAME`, and
+`NAVIDROME_PASSWORD` in the server or Docker environment. The account must be
+able to search the music library through the Subsonic API. Use HTTPS unless the
+connection stays inside a trusted local network.
 
-- The first successful fetch queues the existing history for Navidrome checks
-  and downloads missing songs. Each enabled station refills independently when
-  no first-attempt songs are queued or processing, at most once every 10 minutes.
+- Each fetch queues at most the five most recent plays for Navidrome checks and
+  downloads missing songs. Older plays in the fetched history are not queued.
+  Each enabled station refills independently when no first-attempt songs are
+  queued or processing, at most once every 10 minutes.
   Retries never block fresh history, whether waiting, ready, or processing.
   Failed fetches and **Check now** requests
   respect the same per-station limit, which survives restarts.
-  Songs previously marked **baseline** are also queued on server restart.
+  Existing first-attempt backlogs are reduced to the five most recent per
+  station on restart; older queued plays remain in history as **skipped**.
 - New timestamped plays are compared against persisted history. News and other
   entries without an artist and song title are ignored.
-- The recent plays list shows the latest 300 plays across all stations; use its
-  station filter to view one monitored station's plays without changing monitoring.
+- The recent plays list and statistics use the latest 300 plays across all
+  monitored stations. The station filter updates both the list and statistics.
+  Statistics count completed outcomes only; queued and in-progress plays are
+  excluded. Recovered retries are songs downloaded after at least one failure.
 - Willy sources return the latest 30 plays. Their Spotify links are used for
   metadata, and spotDL searches for audio rather than using the station's
   supplied YouTube video. If no Spotify link is available, spotDL searches
@@ -288,6 +295,9 @@ Use HTTPS unless the connection stays inside a trusted local network.
 - Sky Radio returns its latest 100 playouts through its public GraphQL API.
   Broadcast timestamps are converted to UTC, and valid Spotify track links are
   used for metadata when available.
+- Downloads from Sky Radio Christmas are tagged with the genre `Christmas Music`
+  for Navidrome smart playlists. Existing library songs are not retagged; new
+  downloads appear in the playlist after Navidrome scans them.
 - Before downloading, spotDL searches Navidrome and compares both artist and
   title, ignoring case, accents, and punctuation. Version names such as "Live"
   remain significant. Matches are shown as **already collected**.
@@ -300,11 +310,11 @@ Use HTTPS unless the connection stays inside a trusted local network.
   After six failed attempts it remains failed; a new broadcast queues a new attempt.
   The activity list shows the attempt number and retry deadline.
   Retry state and deadlines survive restarts and are paused with the station.
-- Monitoring runs on the server, independent of browser sessions. Configuration,
-  history, and work survive restarts. Deselect all stations to pause; an
-  in-progress download may finish. Re-enabling a station resumes queued songs
-  and refreshes its history once its first-attempt queue empties and the
-  10-minute limit allows.
+- Monitoring runs on the server, independent of browser sessions. Source
+  selections, history, and work survive restarts. Removing all stations pauses
+  monitoring; an in-progress download may finish. Re-adding a station resumes
+  queued songs and refreshes its history once its first-attempt queue empties
+  and the 10-minute limit allows.
   History that has already disappeared from the source cannot be recovered after
   downtime.
 
@@ -355,7 +365,7 @@ Publishing starts at the next 03:00 after monitoring is first enabled. The
 schedule survives restarts; a missed run publishes the latest completed radio
 day on startup, rather than replaying every missed day. Errors appear in the
 radio page's terminal output and are retried every five minutes. Partial publishing
-is safe to retry without creating new daily copies. Deselecting all stations
+is safe to retry without creating new daily copies. Removing all monitored radios
 pauses publishing. The browser need not be open, but the server/container must
 be running. The account must have permission to create and modify playlists.
 The bundled timezone data keeps the schedule on Brussels time even when Docker
@@ -366,12 +376,12 @@ Set `SPOTDL_RADIO_CONFIG_DIR` to use another directory; Docker defaults to
 `/config`, which should be mapped to persistent appdata. This overrides only the
 radio database location, not the general spotDL configuration directory.
 Optional `NAVIDROME_URL`, `NAVIDROME_USERNAME`, and `NAVIDROME_PASSWORD`
-environment variables must be supplied together and override saved credentials
-at startup without changing station selections.
+environment variables must be supplied together to enable library checks and
+playlist publishing. The credentials are loaded into `radio.sqlite3` at startup.
 The database is owner-readable/writable only on Unix, but contains the Navidrome
 password **unencrypted** for Subsonic authentication. Protect this directory and
-its backups. Saved passwords are never rendered into the page or live stream;
-leaving the password blank retains it only for the same server and username.
+its backups; the environment configuration also contains the password.
+Credentials are never rendered into the page or live stream.
 Radio configuration is server-wide and the web UI is not an authentication
 boundary: keep it on localhost or behind trusted access controls.
 
