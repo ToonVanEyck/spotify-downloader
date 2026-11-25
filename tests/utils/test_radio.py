@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sqlite3
 import wave
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -277,7 +278,12 @@ async def test_nostalgie_fetch_queues_and_downloads_using_spotify_search(
     response = mocker.Mock()
     response.json.return_value = {"data": [nostalgie_track()]}
     get = mocker.patch.object(radio.requests, "get", return_value=response)
-    song = SimpleNamespace(name="Night Fever", artist="Bee Gees", download_url=None)
+    song = SimpleNamespace(
+        name="Night Fever",
+        artist="Bee Gees",
+        album_artist="Bee Gees",
+        download_url=None,
+    )
     search = mocker.patch.object(radio, "get_search_results", return_value=[song])
     connection = mocker.Mock()
     connection.contains.return_value = False
@@ -318,6 +324,38 @@ def test_existing_database_gains_nostalgie_without_losing_station_state(
         stations = {station["id"]: station for station in resumed.view()["stations"]}
         assert stations["stubru"]["enabled"]
         assert not stations["nostalgie"]["enabled"]
+    finally:
+        resumed.db.close()
+
+
+def test_startup_prunes_old_play_history_but_keeps_pending_plays(monitor, tmp_path):
+    old_time = (datetime.now(timezone.utc) - timedelta(days=4)).isoformat()
+    recent_time = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    old_completed = queue_play(
+        monitor, entry=RadioPlay(old_time, "Artist", "Old completed")
+    )
+    old_pending = queue_play(
+        monitor, entry=RadioPlay(old_time, "Artist", "Old pending")
+    )
+    recent_completed = queue_play(
+        monitor, entry=RadioPlay(recent_time, "Artist", "Recent completed")
+    )
+    with monitor.db:
+        monitor.db.executemany(
+            "UPDATE plays SET status='downloaded' WHERE id=?",
+            [(old_completed["id"],), (recent_completed["id"],)],
+        )
+
+    resumed = RadioMonitor(
+        tmp_path / "radio.sqlite3", DownloaderOptions(**DOWNLOADER_OPTIONS)
+    )
+    try:
+        remaining_ids = {
+            row["id"] for row in resumed.db.execute("SELECT id FROM plays")
+        }
+        assert old_completed["id"] not in remaining_ids
+        assert old_pending["id"] in remaining_ids
+        assert recent_completed["id"] in remaining_ids
     finally:
         resumed.db.close()
 
@@ -376,7 +414,9 @@ async def test_willy_api_uses_spotify_and_ignores_station_video(
     response = mocker.Mock()
     response.json.return_value = {"played_tracks": [willy_track()]}
     get = mocker.patch.object(radio.requests, "get", return_value=response)
-    song = SimpleNamespace(name="Song", artist="Artist", download_url=None)
+    song = SimpleNamespace(
+        name="Song", artist="Artist", album_artist="Artist", download_url=None
+    )
     metadata = mocker.patch.object(radio.Song, "from_url", return_value=song)
     search = mocker.patch.object(radio, "get_search_results")
     connection = mocker.Mock()
@@ -443,14 +483,19 @@ async def test_first_history_and_only_unseen_plays_are_queued(monitor, monkeypat
 
 
 @pytest.mark.parametrize("station", ["stubru", "sky-radio-seasonal"])
-async def test_poll_queues_only_five_most_recent_plays(monitor, monkeypatch, station):
-    history = [play(f"Song {minute}", minute) for minute in [1, 7, 4, 0, 6, 2, 5, 3]]
+async def test_poll_queues_only_eight_most_recent_plays(monitor, monkeypatch, station):
+    history = [
+        play(f"Song {minute}", minute) for minute in [1, 10, 7, 4, 0, 9, 6, 2, 8, 5, 3]
+    ]
     monkeypatch.setattr(radio, "fetch_radio_history", lambda _: history)
 
     await monitor.poll_station(station)
     await monitor.poll_station(station)
 
     assert [row["title"] for row in monitor.view()["plays"]] == [
+        "Song 10",
+        "Song 9",
+        "Song 8",
         "Song 7",
         "Song 6",
         "Song 5",
@@ -462,14 +507,14 @@ async def test_poll_queues_only_five_most_recent_plays(monitor, monkeypatch, sta
 async def test_pending_plays_cap_is_per_station_and_excludes_retries(
     monitor, monkeypatch
 ):
-    for minute in range(4):
+    for minute in range(7):
         queue_play(monitor, "stubru", play(f"Existing {minute}", minute))
     retry = queue_play(monitor, "stubru", play("Retry", 10))
     with monitor.db:
         monitor.db.execute(
             "UPDATE plays SET status='retry', attempts=1 WHERE id=?", (retry["id"],)
         )
-    history = [play(f"New {minute}", minute) for minute in range(20, 27)]
+    history = [play(f"New {minute}", minute) for minute in range(20, 30)]
     monkeypatch.setattr(radio, "fetch_radio_history", lambda _: history)
 
     await monitor.poll_station("stubru")
@@ -479,19 +524,22 @@ async def test_pending_plays_cap_is_per_station_and_excludes_retries(
         "SELECT station, status, title FROM plays ORDER BY played_at DESC"
     ).fetchall()
     assert [row["title"] for row in rows if row["station"] == "stubru"] == [
-        "New 26",
+        "New 29",
         "Retry",
+        "Existing 6",
+        "Existing 5",
+        "Existing 4",
         "Existing 3",
         "Existing 2",
         "Existing 1",
         "Existing 0",
     ]
-    assert sum(row["station"] == "radio1" for row in rows) == 5
+    assert sum(row["station"] == "radio1" for row in rows) == 8
 
 
 async def test_restart_limits_old_backlogs_without_deleting_history(monitor, tmp_path):
     for station in ["stubru", "radio1"]:
-        for minute in range(7):
+        for minute in range(10):
             queue_play(monitor, station, play(f"Song {minute}", minute))
     with monitor.db:
         monitor.db.execute(
@@ -510,8 +558,8 @@ async def test_restart_limits_old_backlogs_without_deleting_history(monitor, tmp
                 for row in rows
                 if row["station"] == station and row["status"] == "queued"
             ]
-            assert queued == [f"Song {minute}" for minute in range(6, 1, -1)]
-        assert len(rows) == 14
+            assert queued == [f"Song {minute}" for minute in range(9, 1, -1)]
+        assert len(rows) == 20
         assert (
             next(
                 row
@@ -594,6 +642,85 @@ async def test_first_history_checks_navidrome_before_downloading(
         download.assert_not_called()
     else:
         download.assert_awaited_once()
+
+
+async def test_recent_local_collection_skips_navidrome(monitor, tmp_path, mocker):
+    audio = tmp_path / "song.mp3"
+    audio.write_bytes(b"test audio")
+    entry = play()
+    with monitor.db:
+        monitor.db.execute(
+            """INSERT INTO collected (song_key, path, collected_at)
+            VALUES (?, ?, ?)""",
+            (entry.song_key, str(audio), radio.time.time()),
+        )
+    navidrome = mocker.patch.object(monitor, "navidrome")
+
+    await monitor.process_play(queue_play(monitor, entry=entry))
+
+    assert monitor.view()["plays"][0]["status"] == "already collected"
+    navidrome.assert_not_called()
+
+
+async def test_expired_local_collection_is_rechecked_and_refreshed(
+    monitor, tmp_path, mocker
+):
+    enable(monitor, "stubru")
+    entry = play()
+    old_audio = tmp_path / "old-song.mp3"
+    old_audio.write_bytes(b"old audio")
+    with monitor.db:
+        monitor.db.execute(
+            """INSERT INTO collected (song_key, path, collected_at)
+            VALUES (?, ?, ?)""",
+            (
+                entry.song_key,
+                str(old_audio),
+                radio.time.time() - radio.COLLECTED_TTL - 1,
+            ),
+        )
+    connection = mocker.Mock()
+    connection.contains.return_value = False
+    mocker.patch.object(monitor, "navidrome", return_value=connection)
+    new_audio = tmp_path / "new-song.mp3"
+    new_audio.write_bytes(b"new audio")
+    download = mocker.patch.object(monitor, "download", return_value=new_audio)
+
+    await monitor.process_play(queue_play(monitor, entry=entry))
+
+    connection.contains.assert_called_once_with("Artist", "Song")
+    download.assert_awaited_once()
+    collected = monitor.db.execute(
+        "SELECT path, collected_at FROM collected WHERE song_key=?",
+        (entry.song_key,),
+    ).fetchone()
+    assert collected["path"] == str(new_audio)
+    assert collected["collected_at"] > radio.time.time() - radio.COLLECTED_TTL
+
+
+def test_legacy_collected_rows_get_ttl_when_database_is_upgraded(tmp_path):
+    database = tmp_path / "radio.sqlite3"
+    with sqlite3.connect(database) as db:
+        db.execute(
+            "CREATE TABLE collected (song_key TEXT PRIMARY KEY, path TEXT NOT NULL)"
+        )
+        db.execute(
+            "INSERT INTO collected VALUES (?, ?)",
+            ("legacy-song", str(tmp_path / "song.mp3")),
+        )
+
+    monitor = RadioMonitor(database, DownloaderOptions(**DOWNLOADER_OPTIONS))
+    try:
+        columns = {
+            row["name"] for row in monitor.db.execute("PRAGMA table_info(collected)")
+        }
+        assert "collected_at" in columns
+        row = monitor.db.execute(
+            "SELECT collected_at FROM collected WHERE song_key='legacy-song'"
+        ).fetchone()
+        assert row["collected_at"] > radio.time.time() - radio.COLLECTED_TTL
+    finally:
+        monitor.db.close()
 
 
 @pytest.mark.parametrize("station", ["stubru", "sky-radio-seasonal"])
@@ -891,11 +1018,13 @@ async def test_paused_source_does_not_start_a_download(monitor, mocker):
     download.assert_not_called()
 
 
+@pytest.mark.parametrize("album_artist", ["Artist", "ARTIST", "\u00c1rtist!"])
 async def test_download_uses_source_spotify_id_and_requires_an_audio_file(
-    monitor, tmp_path, mocker
+    monitor, tmp_path, mocker, album_artist
 ):
-    song = SimpleNamespace(name="Song", artist="Artist")
+    song = SimpleNamespace(name="Song", artist="Artist", album_artist=album_artist)
     metadata = mocker.patch.object(radio.Song, "from_url", return_value=song)
+    search = mocker.patch.object(radio, "get_search_results")
     audio = tmp_path / "song.mp3"
     audio.write_bytes(b"test audio")
     downloader = mocker.Mock()
@@ -907,10 +1036,116 @@ async def test_download_uses_source_spotify_id_and_requires_an_audio_file(
 
     assert await monitor.download(entry) == audio
     metadata.assert_called_once_with(entry.spotify_url)
+    search.assert_not_called()
     downloader.pool_download.assert_awaited_once_with(song)
     audio.unlink()
     with pytest.raises(RadioError, match="audio file"):
         await monitor.download(entry)
+
+
+@pytest.mark.parametrize("linked", [True, False])
+async def test_radio_skips_compilation_in_favor_of_artist_release(
+    monitor, tmp_path, mocker, linked
+):
+    compilation = SimpleNamespace(
+        name="Casanova",
+        artist="Ultimate Kaos",
+        album_artist="\u30f4\u30a1\u30ea\u30a2\u30b9\u30fb\u30a2\u30fc\u30c6\u30a3\u30b9\u30c8",
+    )
+    album = SimpleNamespace(
+        name="Casanova", artist="Ultimate Kaos", album_artist="Ultimate Kaos"
+    )
+    metadata = mocker.patch.object(radio.Song, "from_url", return_value=compilation)
+    search = mocker.patch.object(
+        radio, "get_search_results", return_value=[compilation, album]
+    )
+    audio = tmp_path / "Casanova.opus"
+    audio.write_bytes(b"test audio")
+    monitor.downloader = mocker.Mock()
+    monitor.downloader.pool_download = mocker.AsyncMock(return_value=(album, audio))
+    entry = RadioPlay(
+        play().played_at,
+        "Ultimate Kaos",
+        "Casanova",
+        "https://open.spotify.com/track/2FCsQlTxGuAb5v29VkQj5B" if linked else "",
+    )
+
+    assert await monitor.download(entry) == audio
+
+    assert metadata.call_count == int(linked)
+    search.assert_called_once_with("Ultimate Kaos Casanova", limit=5)
+    monitor.downloader.pool_download.assert_awaited_once_with(album)
+    if linked:
+        assert "album artist" in monitor.view()["output"]
+
+
+@pytest.mark.parametrize("album_artist", ["Various Artists", None, ""])
+async def test_radio_rejects_search_results_without_matching_album_artist(
+    monitor, mocker, album_artist
+):
+    candidate = SimpleNamespace(name="Song", artist="Artist", album_artist=album_artist)
+    mocker.patch.object(radio, "get_search_results", return_value=[candidate])
+    downloader = mocker.patch.object(radio, "Downloader")
+
+    with pytest.raises(RadioError, match="matching Spotify"):
+        await monitor.download(play())
+
+    downloader.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("artist", "title"),
+    [
+        ("Cindy", "\u79c1\u9054\u3092\u4fe1\u3058\u3066\u3044\u3066"),
+        ("The Romans", "Another song"),
+        ("Another artist", "Someday Cindy"),
+    ],
+)
+async def test_mismatched_spotify_link_falls_back_to_matching_search_result(
+    monitor, tmp_path, mocker, artist, title
+):
+    wrong = SimpleNamespace(name=title, artist=artist, album_artist=artist)
+    correct = SimpleNamespace(
+        name="Someday Cindy", artist="The Romans", album_artist="The Romans"
+    )
+    mocker.patch.object(radio.Song, "from_url", return_value=wrong)
+    search = mocker.patch.object(
+        radio, "get_search_results", return_value=[wrong, correct]
+    )
+    audio = tmp_path / "song.mp3"
+    audio.write_bytes(b"test audio")
+    monitor.downloader = mocker.Mock()
+    monitor.downloader.pool_download = mocker.AsyncMock(return_value=(correct, audio))
+    entry = RadioPlay(
+        play().played_at,
+        "THE ROMANS",
+        "Someday Cindy",
+        "https://open.spotify.com/track/id",
+    )
+
+    assert await monitor.download(entry) == audio
+
+    search.assert_called_once_with("THE ROMANS Someday Cindy", limit=5)
+    monitor.downloader.pool_download.assert_awaited_once_with(correct)
+    assert "Ignoring mismatched Spotify link" in monitor.view()["output"]
+
+
+async def test_mismatched_spotify_link_without_matching_search_result_is_rejected(
+    monitor, mocker
+):
+    wrong = SimpleNamespace(
+        name="Another song", artist="Another artist", album_artist="Another artist"
+    )
+    mocker.patch.object(radio.Song, "from_url", return_value=wrong)
+    mocker.patch.object(radio, "get_search_results", return_value=[wrong])
+    entry = RadioPlay(
+        play().played_at, "Artist", "Song", "https://open.spotify.com/track/id"
+    )
+
+    with pytest.raises(RadioError, match="matching Spotify"):
+        await monitor.download(entry)
+
+    assert monitor.downloader is None
 
 
 async def test_download_without_spotify_id_rejects_unrelated_recordings(
@@ -929,7 +1164,9 @@ async def test_download_without_spotify_id_rejects_unrelated_recordings(
 async def test_station_video_is_ignored_when_spotify_link_is_missing(
     monitor, tmp_path, mocker
 ):
-    song = SimpleNamespace(name="Song", artist="Artist", download_url=None)
+    song = SimpleNamespace(
+        name="Song", artist="Artist", album_artist="Artist", download_url=None
+    )
     search = mocker.patch.object(radio, "get_search_results", return_value=[song])
     audio = tmp_path / "song.mp3"
     audio.write_bytes(b"test audio")
@@ -947,7 +1184,9 @@ async def test_station_video_is_ignored_when_spotify_link_is_missing(
 async def test_classical_source_searches_by_composer_without_performer_notes(
     monitor, tmp_path, mocker
 ):
-    song = SimpleNamespace(name="Composition", artist="Composer")
+    song = SimpleNamespace(
+        name="Composition", artist="Composer", album_artist="Composer"
+    )
     search = mocker.patch.object(radio, "get_search_results", return_value=[song])
     audio = tmp_path / "composition.mp3"
     audio.write_bytes(b"test audio")
@@ -1242,6 +1481,9 @@ async def test_daily_playlists_deduplicate_replace_and_only_include_monitored_da
     def request(_connection, method, **parameters):
         if method == "getPlaylists":
             return {"playlists": {"playlist": list(remote.values())}}
+        if method == "updatePlaylist":
+            remote[parameters["playlistId"]]["name"] = parameters["name"]
+            return {}
         assert method == "createPlaylist"
         ids = parameters["songId"]
         assert len(ids) == len(set(ids))
@@ -1261,11 +1503,12 @@ async def test_daily_playlists_deduplicate_replace_and_only_include_monitored_da
     await monitor.publish_playlists(start, end)
 
     assert remote["existing"]["songs"] == ["one"]
+    assert remote["existing"]["name"] == "Radio - Studio Brussel"
     assert remote["unrelated"]["songs"] == ["keep"]
     by_name = {value["name"]: value["songs"] for value in remote.values()}
-    assert by_name["spotDL Radio - Willy"] == ["one", "two"]
-    assert by_name["spotDL Radio - Klara"] == []
-    assert by_name["spotDL Radio - Super Mix"] == ["one", "two"]
+    assert by_name["Radio - Willy"] == ["one", "two"]
+    assert by_name["Radio - Klara"] == []
+    assert by_name["Radio - Super Mix"] == ["one", "two"]
     assert len(remote) == 5
     assert lookup.call_count == 3
     assert "Not indexed" in monitor.view()["output"]

@@ -62,5 +62,5 @@ USER spotdl
 RUN uv run --project /app --no-dev --frozen --no-sync spotdl --download-deno
 
 # Entrypoint command
-ENTRYPOINT ["uv", "run", "--project", "/app", "--no-dev", "--frozen", "--no-sync", "spotdl"]
-CMD ["web", "--host", "0.0.0.0", "--port", "8800", "--web-use-output-dir", "--format", "opus", "--bitrate", "disable"]
+ENTRYPOINT ["/bin/sh", "-c", "umask 002; exec uv run --project /app --no-dev --frozen --no-sync spotdl \"$@\"", "--"]
+CMD ["web", "--host", "0.0.0.0", "--port", "8800", "--web-use-output-dir", "--output", "{album-artist}/{album}/{title}.{output-ext}", "--format", "opus", "--bitrate", "disable"]

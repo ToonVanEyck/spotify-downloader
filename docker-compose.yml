@@ -12,6 +12,7 @@ services:
       - spotdl_config:/config
     environment:
       - TZ=${TZ:-UTC}
+      - NAVIDROME_MUSIC_DIR=${NAVIDROME_MUSIC_DIR:-}
 
 volumes:
   spotdl_music:

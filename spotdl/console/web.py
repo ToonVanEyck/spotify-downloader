@@ -25,7 +25,7 @@ from spotdl.utils.web import (
     fix_mime_types,
     get_current_state,
 )
-from spotdl.web import api, radio, routes
+from spotdl.web import api, library, radio, routes
 
 __all__ = ["web"]
 
@@ -74,6 +74,7 @@ def web(web_settings: WebOptions, downloader_settings: DownloaderOptions):
     app_state.api.include_router(api.router)
     app_state.api.include_router(routes.router)
     app_state.api.include_router(radio.router)
+    app_state.api.include_router(library.router)
 
     # Add the CORS middleware
     app_state.api.add_middleware(

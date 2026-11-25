@@ -1,0 +1,107 @@
+{% extends "base.html.j2" %}
+
+{% block content %}
+<div class="mx-auto max-w-screen-2xl space-y-8 px-4 py-8 sm:px-6 lg:px-8">
+    <header>
+        <h1 class="text-2xl font-semibold">Replace a library recording</h1>
+        <p class="mt-2 max-w-3xl text-sm text-base-content/65">
+            Search your Navidrome library, choose a YouTube or YouTube Music source,
+            and replace the selected audio file in place.
+        </p>
+    </header>
+
+    {% if error %}
+    <div class="alert alert-error" role="alert">{{ error|e }}</div>
+    {% elif replaced %}
+    <div class="alert alert-success" role="status">The library recording was replaced.</div>
+    {% endif %}
+
+    <form action="/library" method="get" class="join flex max-w-3xl">
+        <label class="sr-only" for="library-query">Search Navidrome</label>
+        <input id="library-query" class="input input-bordered join-item w-full"
+            type="search" name="q" value="{{ query|e }}"
+            placeholder="Search artist, title, or album" maxlength="200" required />
+        <button class="btn btn-primary join-item" type="submit">
+            <iconify-icon icon="clarity:search-line" style="font-size: 20px"></iconify-icon>
+            Search
+        </button>
+    </form>
+
+    {% if results %}
+    <section aria-labelledby="library-results-heading">
+        <h2 id="library-results-heading" class="mb-3 text-xl font-semibold">Navidrome results</h2>
+        <div class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {% for song in results %}
+            <article class="card card-bordered bg-base-100 shadow-sm">
+                <div class="card-body">
+                    <h3 class="card-title">{{ song.title|e }}</h3>
+                    <p>{{ song.artist|e }}</p>
+                    {% if song.album %}
+                    <p class="text-sm text-base-content/60">{{ song.album|e }}</p>
+                    {% endif %}
+                    <div class="card-actions mt-auto justify-end">
+                        <a class="btn btn-outline"
+                            href="/library?q={{ query|urlencode }}&amp;song_id={{ song.id|urlencode }}">
+                            Find replacement sources
+                        </a>
+                    </div>
+                </div>
+            </article>
+            {% endfor %}
+        </div>
+    </section>
+    {% elif query and not error %}
+    <p class="text-sm text-base-content/65" role="status">No Navidrome tracks matched that search.</p>
+    {% endif %}
+
+    {% if selected_song %}
+    <section aria-labelledby="source-results-heading">
+        <div class="mb-4 border-b border-base-content/10 pb-3">
+            <h2 id="source-results-heading" class="text-xl font-semibold">
+                Sources for {{ selected_song.title|e }} — {{ selected_song.artist|e }}
+            </h2>
+            {% if selected_song.album %}
+            <p class="mt-1 text-sm text-base-content/60">{{ selected_song.album|e }}</p>
+            {% endif %}
+        </div>
+
+        {% if candidates %}
+        <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
+            {% for source in candidates %}
+            <article class="card card-bordered bg-base-100 shadow-sm">
+                <div class="card-body">
+                    <div class="flex flex-wrap items-center gap-2">
+                        <span class="badge badge-outline">{{ source.source|e }}</span>
+                        {% if source.verified %}
+                        <span class="badge badge-success badge-outline">Verified</span>
+                        {% endif %}
+                    </div>
+                    <h3 class="card-title">{{ source.name|e }}</h3>
+                    <p>{{ source.author|e }}{% if source.duration %} &middot; {{ source.duration|int }} sec{% endif %}</p>
+                    <div class="card-actions mt-auto justify-end">
+                        <a class="btn btn-ghost" href="{{ source.url|e }}"
+                            target="_blank" rel="noopener noreferrer">Preview source</a>
+                        <form action="/library/replace" method="post">
+                            <input type="hidden" name="song_id" value="{{ selected_song.id|e }}" />
+                            <input type="hidden" name="source_url" value="{{ source.url|e }}" />
+                            <button class="btn btn-primary" type="submit">
+                                Replace recording
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            </article>
+            {% endfor %}
+        </div>
+        <p class="mt-4 text-sm text-warning">
+            Replacing overwrites the existing audio file. The old recording is not retained.
+        </p>
+        {% else %}
+        <p class="text-sm text-base-content/65" role="status">
+            No alternative YouTube sources were found.
+        </p>
+        {% endif %}
+    </section>
+    {% endif %}
+</div>
+{% endblock content %}

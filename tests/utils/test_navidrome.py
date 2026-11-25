@@ -77,6 +77,67 @@ def test_song_lookup_returns_id_and_rejects_missing_id(navidrome, mocker):
         navidrome.find_song_id("Artist", "Song")
 
 
+def test_search_songs_returns_display_metadata(navidrome, mocker):
+    request = mocker.patch.object(
+        Navidrome,
+        "request",
+        return_value={
+            "searchResult3": {
+                "song": [
+                    {
+                        "id": "song-123",
+                        "title": "Song",
+                        "artist": "Artist",
+                        "album": "Album",
+                        "duration": 210,
+                        "path": "Artist/Album/song.mp3",
+                    }
+                ]
+            }
+        },
+    )
+
+    assert navidrome.search_songs("Artist Song") == [
+        {
+            "id": "song-123",
+            "title": "Song",
+            "artist": "Artist",
+            "album": "Album",
+            "duration": 210,
+        }
+    ]
+    request.assert_called_once_with(
+        "search3",
+        query="Artist Song",
+        artistCount=0,
+        albumCount=0,
+        songCount=20,
+        songOffset=0,
+    )
+
+
+def test_get_song_requires_matching_id_and_path(navidrome, mocker):
+    request = mocker.patch.object(
+        Navidrome,
+        "request",
+        return_value={
+            "song": {
+                "id": "song-123",
+                "title": "Song",
+                "artist": "Artist",
+                "path": "Artist/Album/song.mp3",
+            }
+        },
+    )
+
+    assert navidrome.get_song("song-123")["path"] == "Artist/Album/song.mp3"
+    request.assert_called_once_with("getSong", id="song-123")
+
+    request.return_value = {"song": {"id": "another-song", "path": "song.mp3"}}
+    with pytest.raises(NavidromeError, match="incomplete song file metadata"):
+        navidrome.get_song("song-123")
+
+
 @pytest.mark.parametrize("songs", [["one", "two", "one"], []])
 def test_playlist_replaces_contents_using_owned_id(navidrome, mocker, songs):
     request = mocker.patch.object(
@@ -119,6 +180,53 @@ def test_playlist_creation_does_not_replace_another_users_playlist(navidrome, mo
     )
     assert navidrome.replace_playlist("Radio", ["one", "one"]) == "new"
     request.assert_called_with("createPlaylist", name="Radio", songId=["one"])
+
+
+@pytest.mark.parametrize("existing_name", ["Radio - Station", "spotDL Radio - Station"])
+def test_playlist_reuses_owned_id_and_migrates_old_name(
+    navidrome, mocker, existing_name
+):
+    request = mocker.patch.object(
+        Navidrome,
+        "request",
+        side_effect=[
+            {
+                "playlists": {
+                    "playlist": [
+                        {
+                            "id": "owned",
+                            "name": existing_name,
+                            "owner": navidrome.username,
+                        },
+                        {
+                            "id": "other",
+                            "name": "spotDL Radio - Station",
+                            "owner": "other",
+                        },
+                    ]
+                }
+            },
+            {"playlist": {"id": "owned"}},
+            {},
+        ],
+    )
+
+    assert (
+        navidrome.replace_playlist(
+            "Radio - Station", ["one"], previous_name="spotDL Radio - Station"
+        )
+        == "owned"
+    )
+    assert request.call_args_list[:2] == [
+        mocker.call("getPlaylists"),
+        mocker.call("createPlaylist", playlistId="owned", songId=["one"]),
+    ]
+    if existing_name.startswith("spotDL"):
+        request.assert_called_with(
+            "updatePlaylist", playlistId="owned", name="Radio - Station"
+        )
+    else:
+        assert request.call_count == 2
 
 
 @pytest.mark.parametrize(

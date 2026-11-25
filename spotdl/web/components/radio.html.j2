@@ -48,7 +48,7 @@
     {% if error %}
     <div class="alert alert-error" role="alert">{{ error|e }}</div>
     {% elif request.query_params.get("added") %}
-    <div class="alert alert-success" role="status">Radio added. Its five most recent plays will be checked when its queue allows.</div>
+    <div class="alert alert-success" role="status">Radio added. Its eight most recent plays will be checked when its queue allows.</div>
     {% elif request.query_params.get("removed") %}
     <div class="alert alert-success" role="status">Radio removed. Its history has been kept.</div>
     {% elif request.query_params.get("checking") %}

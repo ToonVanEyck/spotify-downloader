@@ -28,6 +28,7 @@ def fake_app_state(monkeypatch):
         app_state, "logger", logging.getLogger("spotdl-test"), raising=False
     )
     monkeypatch.setattr(app_state, "clients", {})
+    monkeypatch.setattr(app_state, "download_queue", web_utils.DownloadQueue())
     monkeypatch.setattr(
         app_state, "radio_monitor", SimpleNamespace(optional_navidrome=lambda: None)
     )
@@ -297,7 +298,8 @@ def test_search_url_shows_preview_without_downloading(monkeypatch, collection):
     assert "Preparing download" not in response_text
 
 
-def test_download_button_starts_collection_download(client, monkeypatch):
+@pytest.mark.parametrize("collection", ["album", "playlist", "artist"])
+def test_download_button_starts_collection_download(client, monkeypatch, collection):
     monkeypatch.setattr(app_state, "web_settings", {}, raising=False)
     songs = [
         SimpleNamespace(name="first", artist="Artist", url="first"),
@@ -305,11 +307,24 @@ def test_download_button_starts_collection_download(client, monkeypatch):
     ]
     parsed_queries = []
     downloaded_songs = []
-    url = "https://open.spotify.com/album/example"
+    active = 0
+    peak_active = 0
+    url = f"https://open.spotify.com/{collection}/example"
 
     def fake_get_simple_songs(query, **kwargs):
         parsed_queries.append(query)
         return songs
+
+    download_song = client.download_song
+
+    async def tracked_download(song):
+        nonlocal active, peak_active
+        active += 1
+        peak_active = max(peak_active, active)
+        try:
+            return await download_song(song)
+        finally:
+            active -= 1
 
     async def fake_pool_download(song):
         downloaded_songs.append(song)
@@ -317,6 +332,7 @@ def test_download_button_starts_collection_download(client, monkeypatch):
         return song, "downloaded"
 
     monkeypatch.setattr(routes, "get_simple_songs", fake_get_simple_songs)
+    monkeypatch.setattr(client, "download_song", tracked_download)
     monkeypatch.setattr(
         client.downloader, "pool_download", fake_pool_download, raising=False
     )
@@ -330,6 +346,7 @@ def test_download_button_starts_collection_download(client, monkeypatch):
 
     assert parsed_queries == [[url]]
     assert downloaded_songs == songs
+    assert peak_active == 1
     assert "Download complete" in response_text
     assert "WARNING [yt-dlp] warning for first" in client.get_log_output()
     assert "Download complete." in client.get_log_output()

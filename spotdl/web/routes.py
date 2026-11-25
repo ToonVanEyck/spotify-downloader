@@ -410,19 +410,15 @@ async def gen_download(signals: Signals):
             return
 
         yield SSE.patch_elements(
-            f'<div id="download-status" role="status">Downloading {len(songs)} track(s)...</div>'
+            f'<div id="download-status" role="status">Queued {len(songs)} track(s); '
+            "downloading one at a time...</div>"
         )
 
-        download_tasks = [
-            asyncio.create_task(client.download_song(song)) for song in songs
-        ]
         failures = 0
         collected = 0
-        for completed, download in enumerate(
-            asyncio.as_completed(download_tasks), start=1
-        ):
+        for completed, song in enumerate(songs, start=1):
             try:
-                result = await download
+                result = await client.download_song(song)
                 if result.already_collected:
                     collected += 1
                 elif result.path is None:

@@ -56,8 +56,9 @@
         {% include "navbar.html.j2" %}
 
         <nav class="tabs tabs-border border-b border-base-content/10 px-4 sm:px-6" aria-label="Download modes">
-            <a href="/" class="tab {% if not request or not request.url.path.startswith('/radio') %}tab-active{% endif %}">Downloads</a>
+            <a href="/" class="tab {% if not request or (not request.url.path.startswith('/radio') and not request.url.path.startswith('/library')) %}tab-active{% endif %}">Downloads</a>
             <a href="/radio" class="tab {% if request and request.url.path.startswith('/radio') %}tab-active{% endif %}">Radio monitor</a>
+            <a href="/library" class="tab {% if request and request.url.path.startswith('/library') %}tab-active{% endif %}">Library repair</a>
         </nav>
 
         <!-- Content -->

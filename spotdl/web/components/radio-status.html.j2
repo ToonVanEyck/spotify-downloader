@@ -41,7 +41,14 @@
                     <form action="/radio/stations" method="post">
                         <input type="hidden" name="action" value="remove">
                         <input type="hidden" name="station" value="{{ station.id|e }}">
-                        <button class="btn btn-ghost btn-xs text-error" type="submit">Remove</button>
+                        <button class="btn btn-ghost btn-xs btn-square text-base-content/60 hover:text-error"
+                            type="submit" aria-label="Remove {{ station.name|e }}" title="Remove {{ station.name|e }}">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24"
+                                fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                                stroke-linejoin="round" aria-hidden="true">
+                                <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 10v6M14 10v6" />
+                            </svg>
+                        </button>
                     </form>
                 </div>
                 <p class="mt-2 text-xs text-base-content/60">Last check: {{ station.checked|e }}</p>
@@ -104,7 +111,7 @@
             </label>
         </div>
         <p class="mb-3 text-xs text-base-content/60">
-            Latest 300 plays. Each station queues at most its five most recent plays per check.
+            Latest 300 plays. Each station queues at most its eight most recent plays per check.
             Failed tracks get up to five retries after 2, 4, 8, 16, and 32 minutes,
             after normal queued downloads; a later play can be tried again.
             Only the history still visible on the source can be recovered after downtime.

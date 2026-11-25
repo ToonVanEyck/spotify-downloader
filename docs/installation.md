@@ -169,6 +169,10 @@ In Unraid, add a container with these settings:
   - `NAVIDROME_URL`: your server URL, for example `http://192.168.1.10:4533`
   - `NAVIDROME_USERNAME`: your Navidrome username
   - `NAVIDROME_PASSWORD`: your Navidrome password
+- Optional override for the **Library repair** tab:
+  - `NAVIDROME_MUSIC_DIR`: set this only if the Navidrome music root differs
+    from spotDL's configured web download location. For example, use `/music`
+    when that is the shared directory inside the spotDL container.
 - Post Arguments: leave blank; the image starts the web server by default
 
 Radio station selections, history, retries, and Navidrome credentials are stored
@@ -188,8 +192,14 @@ container if you want to keep its radio state.
 
 The image defaults to `--format opus --bitrate disable` for web and radio
 downloads, avoiding an extra lossy conversion when the source is WebM/Opus.
+Downloads use the output template `{album-artist}/{album}/{title}.{output-ext}`.
 Custom Post Arguments replace the image's default command, so include these
 options if you override it.
+
+The container uses umask `002`, allowing group write access to newly created
+downloads and directories when their creation modes permit it. This does not
+change existing permissions. Samba users also need appropriate group and share
+access to delete files.
 
 The container runs as UID `99` and GID `100` (Unraid's standard `nobody:users`
 IDs), so ensure the mapped music directory is writable by them. Open

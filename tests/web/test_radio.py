@@ -113,6 +113,22 @@ async def test_add_and_remove_radio_redirect_and_preserve_history(monitor):
     assert monitor.view()["plays"][0]["title"] == "Song"
 
 
+async def test_radio_remove_button_is_accessible_icon(monitor):
+    monitor.add_station("stubru")
+    response = await radio.radio_page(request())
+    page = BeautifulSoup(response.body, "html.parser")
+    station = page.select_one('input[name="station"][value="stubru"]')
+    form = station.find_parent("form")
+    button = form.select_one('button[type="submit"]')
+
+    assert form["action"] == "/radio/stations"
+    assert form.select_one('input[name="action"]')["value"] == "remove"
+    assert button["aria-label"] == "Remove Studio Brussel"
+    assert "text-base-content/60" in button["class"]
+    assert "hover:text-error" in button["class"]
+    assert button.select_one('svg[aria-hidden="true"][stroke="currentColor"]')
+
+
 async def test_cross_origin_radio_changes_are_rejected(monitor):
     with pytest.raises(HTTPException) as error:
         await radio.update_station(

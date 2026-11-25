@@ -256,6 +256,16 @@ The `/api/download/url` endpoint returns
 `{"status": "already collected", "song": "..."}` for matches, and the usual file
 path for successful downloads.
 
+Regular downloads (including entire playlists, albums, and artists), radio
+downloads, and library repairs share one server-wide queue. Only one track is
+checked and downloaded at a time, regardless of the **threads** setting.
+Collections submit one track at a time instead of starting a task for every
+song. Waiting requests are served in arrival order, allowing radio and repair
+work to run between collection tracks. An active track finishes before its
+slot is released, even if its browser request is cancelled. Unstarted regular
+downloads and repairs are not persisted across browser disconnects or server
+restarts; radio work remains persisted.
+
 ### Radio monitoring
 
 Open the **Radio monitor** tab to collect songs from 11 **Sky Radio** stations,
@@ -269,25 +279,37 @@ Navidrome by setting `NAVIDROME_URL`, `NAVIDROME_USERNAME`, and
 able to search the music library through the Subsonic API. Use HTTPS unless the
 connection stays inside a trusted local network.
 
-- Each fetch queues at most the five most recent plays for Navidrome checks and
+- Each fetch queues at most the eight most recent plays for Navidrome checks and
   downloads missing songs. Older plays in the fetched history are not queued.
   Each enabled station refills independently when no first-attempt songs are
   queued or processing, at most once every 10 minutes.
   Retries never block fresh history, whether waiting, ready, or processing.
   Failed fetches and **Check now** requests
   respect the same per-station limit, which survives restarts.
-  Existing first-attempt backlogs are reduced to the five most recent per
+  Existing first-attempt backlogs are reduced to the eight most recent per
   station on restart; older queued plays remain in history as **skipped**.
 - New timestamped plays are compared against persisted history. News and other
   entries without an artist and song title are ignored.
+- Completed radio play history is retained for three days; queued and retrying
+  plays are kept until processing finishes.
 - The recent plays list and statistics use the latest 300 plays across all
   monitored stations. The station filter updates both the list and statistics.
   Statistics count completed outcomes only; queued and in-progress plays are
   excluded. Recovered retries are songs downloaded after at least one failure.
 - Willy sources return the latest 30 plays. Their Spotify links are used for
   metadata, and spotDL searches for audio rather than using the station's
-  supplied YouTube video. If no Spotify link is available, spotDL searches
-  Spotify by artist and title first.
+  supplied YouTube video. Linked Spotify metadata must match both the broadcast
+  artist and title using the same checks as search results. If a link points to
+  a different recording, spotDL logs a warning and searches Spotify by artist and
+  title instead, just as when no link is available. If no matching recording is
+  found, the play fails and follows the normal retry schedule.
+- Radio downloads also require the Spotify album artist to equal the track's
+  primary artist, ignoring case, accents, and punctuation. A linked release with
+  a different album artist triggers artist/title search; search results with a
+  different or missing album artist are skipped. This avoids Various Artists
+  compilations, but can also exclude collaborations or classical releases whose
+  album and track artists differ. If no eligible result is found among the first
+  five search results, the play follows the normal retry schedule.
 - Nostalgie returns the latest API page (currently 15 plays); songs are found
   by artist and title. Its timestamps have no timezone, so they are interpreted
   as Brussels local time. Repeated times during the autumn clock change cannot
@@ -330,6 +352,25 @@ The Navidrome connection checks its library and publishes playlists; it does not
 upload audio files or trigger a library scan. Configure Navidrome to scan the chosen output folder. The
 `--web-use-output-dir` option also applies to ordinary web downloads.
 
+### Repairing a library recording
+
+Open the **Library repair** tab to search Navidrome, review YouTube Music and
+YouTube suggestions, and replace a selected track's audio with a chosen source.
+The source already recorded in the file's metadata comment is omitted from the
+suggestions when it can be identified.
+
+The repair tab uses the configured web download location as the Navidrome music
+root. With `--web-use-output-dir`, relative output templates use the server's
+working directory; otherwise the regular web downloads directory is used.
+`NAVIDROME_MUSIC_DIR` can override this when Navidrome uses a different root.
+The server must have write access to the shared directory. For the Unraid
+container, the existing `/music` mount and working directory are reused, so no
+additional setting is needed. The feature preserves the existing file format
+and permissions, downloads to a temporary file beside the original, and
+replaces the original only after a successful download. The old audio is
+permanently overwritten without a backup. Keep the web UI on localhost or
+behind trusted access controls.
+
 For audio without an extra lossy MP3 conversion, use Opus when your player
 supports it:
 
@@ -348,8 +389,13 @@ cannot restore detail missing from the source.
 At **03:00 Europe/Brussels** every day, the server publishes playlists for the
 preceding radio day (03:00 to 03:00, with daylight-saving adjustments):
 
-- **spotDL Radio - [station]** for each currently monitored station.
-- **spotDL Radio - Super Mix** combining all currently monitored stations.
+- **Radio - [station]** for each currently monitored station.
+- **Radio - Super Mix** combining all currently monitored stations.
+
+On the next successful publication, an existing owned playlist with the old
+`spotDL Radio - ...` name is reused and renamed, preserving its playlist ID.
+If the new name already exists, that playlist is used instead; other playlists
+are not deleted.
 
 Playlists include songs from the persisted play history, not just the latest
 300 entries displayed on the page. Only songs found in Navidrome at publishing

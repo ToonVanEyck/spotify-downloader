@@ -30,14 +30,16 @@ from spotdl.types.song import Song
 from spotdl.utils.logging import capture_web_output
 from spotdl.utils.navidrome import Navidrome, normalize_track_text
 from spotdl.utils.search import get_search_results
-from spotdl.utils.web import get_web_download_output
+from spotdl.utils.web import app_state, get_web_download_output
 
 logger = logging.getLogger(__name__)
 
 POLL_INTERVAL = 10 * 60
-MAX_QUEUED_PLAYS = 5
+MAX_QUEUED_PLAYS = 8
 DOWNLOAD_RETRIES = 5
 DOWNLOAD_RETRY_INTERVAL = 2 * 60
+COLLECTED_TTL = 24 * 60 * 60
+PLAY_HISTORY_TTL = timedelta(days=3)
 STATIONS = {
     "radio1": "Radio 1",
     "radio2": "Radio 2",
@@ -71,7 +73,7 @@ SKY_RADIO_API_URL = "https://graph.talparad.io/"
 SKY_RADIO_API_KEY = "da2-abza7qpnqbfe5ihpk4jhcslpgy"
 SKY_RADIO_QUERY = """query GetPlayouts($slug: String!) {
     station(slug: $slug) {
-        getPlayouts(limit: 100) {
+        getPlayouts(limit: 15) {
             playouts {
                 broadcastDate
                 track {
@@ -472,7 +474,8 @@ class RadioMonitor:
                 UNIQUE(station, played_at, artist, title)
             );
             CREATE TABLE IF NOT EXISTS collected (
-                song_key TEXT PRIMARY KEY, path TEXT NOT NULL
+                song_key TEXT PRIMARY KEY, path TEXT NOT NULL,
+                collected_at REAL NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS playlist_state (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -510,7 +513,7 @@ class RadioMonitor:
                     FROM plays WHERE status='queued' AND attempts=0
                 ) WHERE position > ?
             )""",
-            ("Skipped: only the five most recent plays are queued.", MAX_QUEUED_PLAYS),
+            ("Skipped: only the eight most recent plays are queued.", MAX_QUEUED_PLAYS),
         )
         if "retry_at" not in columns:
             self.db.execute(
@@ -529,10 +532,23 @@ class RadioMonitor:
                         row["id"],
                     ),
                 )
+        collected_columns = {
+            row["name"] for row in self.db.execute("PRAGMA table_info(collected)")
+        }
+        if "collected_at" not in collected_columns:
+            self.db.execute(
+                "ALTER TABLE collected ADD COLUMN collected_at REAL NOT NULL DEFAULT 0"
+            )
+            self.db.execute("UPDATE collected SET collected_at=?", (time.time(),))
+        self.db.execute(
+            "DELETE FROM collected WHERE collected_at <= ?",
+            (time.time() - COLLECTED_TTL,),
+        )
         self.db.executemany(
             "INSERT OR IGNORE INTO stations(id) VALUES (?)",
             [(station,) for station in STATIONS],
         )
+        self.prune_play_history()
         self.db.commit()
         self.settings = settings.copy()
         self.settings["simple_tui"] = True
@@ -549,6 +565,17 @@ class RadioMonitor:
 
         with self.log_lock:
             self.logs.extend(line[:8000] for line in message.splitlines())
+
+    def prune_play_history(self) -> None:
+        """Remove expired history while preserving unfinished downloads."""
+
+        cutoff = (datetime.now(timezone.utc) - PLAY_HISTORY_TTL).isoformat()
+        with self.db:
+            self.db.execute(
+                """DELETE FROM plays WHERE played_at < ?
+                AND status NOT IN ('queued', 'checking', 'downloading', 'retry')""",
+                (cutoff,),
+            )
 
     def view(self) -> dict:
         """Return public configuration and recent activity, never the password."""
@@ -776,7 +803,7 @@ class RadioMonitor:
         self.db.close()
 
     async def poll_station(self, station: str) -> None:
-        """Queue at most the five most recent plays from a source."""
+        """Queue at most the eight most recent plays from a source."""
 
         self.append_log(f"[{STATIONS[station]}] Fetching radio history...")
         history = await asyncio.to_thread(fetch_radio_history, station)
@@ -814,6 +841,7 @@ class RadioMonitor:
                 "UPDATE stations SET initialized=1, checked_at=?, error='' WHERE id=?",
                 (time.time(), station),
             )
+        self.prune_play_history()
         self.append_log(f"[{STATIONS[station]}] {added} new play(s) queued.")
         self.queue_wake.set()
 
@@ -855,28 +883,40 @@ class RadioMonitor:
     async def download(self, play: RadioPlay) -> Path:
         """Resolve radio metadata through spotDL and download the matching song."""
 
-        song: Optional[Song]
+        def matches(candidate: Song) -> bool:
+            return (
+                ratio(
+                    normalize_track_text(candidate.name or ""),
+                    normalize_track_text(play.title),
+                )
+                >= 85
+                and ratio(
+                    normalize_track_text(candidate.artist or ""),
+                    normalize_track_text(play.search_artist),
+                )
+                >= 85
+                and normalize_track_text(candidate.album_artist or "")
+                == normalize_track_text(candidate.artist or "")
+            )
+
+        song: Optional[Song] = None
         if play.spotify_url:
             song = await asyncio.to_thread(Song.from_url, play.spotify_url)
-        else:
+            if not matches(song):
+                self.append_log(
+                    f"WARNING Ignoring mismatched Spotify link {play.spotify_url}: "
+                    f"{song.artist} - {song.name} (album artist: {song.album_artist}) "
+                    f"does not match {play.search_artist} - {play.title} "
+                    "or its album artist differs from its artist; "
+                    "searching by artist and title."
+                )
+                song = None
+        if song is None:
             songs = await asyncio.to_thread(
                 get_search_results, f"{play.search_artist} {play.title}", limit=5
             )
             song = next(
-                (
-                    candidate
-                    for candidate in songs
-                    if ratio(
-                        normalize_track_text(candidate.name or ""),
-                        normalize_track_text(play.title),
-                    )
-                    >= 85
-                    and ratio(
-                        normalize_track_text(candidate.artist or ""),
-                        normalize_track_text(play.search_artist),
-                    )
-                    >= 85
-                ),
+                (candidate for candidate in songs if matches(candidate)),
                 None,
             )
             if song is None:
@@ -907,6 +947,11 @@ class RadioMonitor:
         self.wake.set()
 
     async def process_play(self, row: sqlite3.Row) -> None:
+        """Wait for the shared web queue before checking or downloading a play."""
+
+        await app_state.download_queue.run(lambda: self._process_play(row))
+
+    async def _process_play(self, row: sqlite3.Row) -> None:
         """Never download after a failed library check, or collect a song twice."""
 
         play = RadioPlay(
@@ -920,9 +965,14 @@ class RadioMonitor:
         self.set_status(row["id"], "checking")
         self.append_log(f"{label}: checking Navidrome...")
         try:
-            collected = self.db.execute(
-                "SELECT path FROM collected WHERE song_key=?", (play.song_key,)
-            ).fetchone()
+            with self.db:
+                self.db.execute(
+                    "DELETE FROM collected WHERE collected_at <= ?",
+                    (time.time() - COLLECTED_TTL,),
+                )
+                collected = self.db.execute(
+                    "SELECT path FROM collected WHERE song_key=?", (play.song_key,)
+                ).fetchone()
             local_copy = collected is not None and Path(collected["path"]).is_file()
             if local_copy or await asyncio.to_thread(
                 self.navidrome().contains, play.search_artist, play.title
@@ -947,8 +997,9 @@ class RadioMonitor:
                     await asyncio.to_thread(_tag_christmas_genre, path)
             with self.db:
                 self.db.execute(
-                    "INSERT OR REPLACE INTO collected VALUES (?, ?)",
-                    (play.song_key, str(path.absolute())),
+                    """INSERT OR REPLACE INTO collected
+                    (song_key, path, collected_at) VALUES (?, ?, ?)""",
+                    (play.song_key, str(path.absolute()), time.time()),
                 )
             self.set_status(row["id"], "downloaded", path=str(path.absolute()))
             self.append_log(f"{label}: downloaded.")
@@ -1053,16 +1104,24 @@ class RadioMonitor:
         mix = []
         for station, song_ids in tracks.items():
             mix.extend(song_ids)
-            name = f"spotDL Radio - {STATIONS[station]}"
-            await asyncio.to_thread(connection.replace_playlist, name, song_ids)
+            name = f"Radio - {STATIONS[station]}"
+            await asyncio.to_thread(
+                connection.replace_playlist,
+                name,
+                song_ids,
+                previous_name=f"spotDL {name}",
+            )
             self.append_log(
                 f"Playlist {name}: replaced with {len(set(song_ids))} unique song(s)."
             )
         await asyncio.to_thread(
-            connection.replace_playlist, "spotDL Radio - Super Mix", mix
+            connection.replace_playlist,
+            "Radio - Super Mix",
+            mix,
+            previous_name="spotDL Radio - Super Mix",
         )
         self.append_log(
-            f"Playlist spotDL Radio - Super Mix: replaced with {len(set(mix))} unique song(s)."
+            f"Playlist Radio - Super Mix: replaced with {len(set(mix))} unique song(s)."
         )
 
     async def check_playlists(self, now: float) -> None:

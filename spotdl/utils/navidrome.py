@@ -144,7 +144,62 @@ class Navidrome:
                 return None
             offset += len(songs)
 
-    def replace_playlist(self, name: str, song_ids: list[str]) -> str:
+    def search_songs(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
+        """Return validated Navidrome song results for a user-facing search."""
+
+        result = self.request(
+            "search3",
+            query=query,
+            artistCount=0,
+            albumCount=0,
+            songCount=limit,
+            songOffset=0,
+        )
+        search = result.get("searchResult3")
+        if not isinstance(search, dict):
+            raise NavidromeError("Navidrome omitted its song search results.")
+        songs = search.get("song", [])
+        if not isinstance(songs, list):
+            raise NavidromeError("Navidrome returned an invalid song list.")
+        validated = []
+        for song in songs:
+            if not isinstance(song, dict) or not all(
+                isinstance(song.get(key), str) and song[key]
+                for key in ("id", "title", "artist")
+            ):
+                raise NavidromeError("Navidrome returned incomplete song metadata.")
+            validated.append(
+                {
+                    "id": song["id"],
+                    "title": song["title"],
+                    "artist": song["artist"],
+                    "album": song.get("album", ""),
+                    "duration": song.get("duration"),
+                }
+            )
+        return validated
+
+    def get_song(self, song_id: str) -> dict[str, Any]:
+        """Fetch a song by ID, including its Navidrome-relative file path."""
+
+        result = self.request("getSong", id=song_id)
+        song = result.get("song")
+        if (
+            not isinstance(song, dict)
+            or song.get("id") != song_id
+            or not isinstance(song.get("title"), str)
+            or not song["title"]
+            or not isinstance(song.get("artist"), str)
+            or not song["artist"]
+            or not isinstance(song.get("path"), str)
+            or not song["path"]
+        ):
+            raise NavidromeError("Navidrome returned incomplete song file metadata.")
+        return song
+
+    def replace_playlist(
+        self, name: str, song_ids: list[str], *, previous_name: str | None = None
+    ) -> str:
         """Replace an owned, named playlist's entire contents, or create it once."""
 
         result = self.request("getPlaylists")
@@ -155,6 +210,7 @@ class Navidrome:
         if not isinstance(playlists, list):
             raise NavidromeError("Navidrome returned an invalid playlist list.")
         matches = []
+        previous_matches = []
         for playlist in playlists:
             if not isinstance(playlist, dict) or not all(
                 isinstance(playlist.get(key), str) and playlist[key]
@@ -163,9 +219,16 @@ class Navidrome:
                 raise NavidromeError("Navidrome returned invalid playlist metadata.")
             if playlist.get("name") == name and playlist.get("owner") == self.username:
                 matches.append(playlist["id"])
+            elif (
+                playlist["name"] == previous_name and playlist["owner"] == self.username
+            ):
+                previous_matches.append(playlist["id"])
+        rename = not matches and bool(previous_matches)
+        if rename:
+            matches = previous_matches
         if len(matches) > 1:
             raise NavidromeError(
-                f"Multiple owned playlists named {name!r}; keep only one."
+                f"Multiple owned playlists named {(previous_name if rename else name)!r}; keep only one."
             )
         parameters: dict[str, Any] = {"songId": list(dict.fromkeys(song_ids))}
         if matches:
@@ -182,4 +245,6 @@ class Navidrome:
             raise NavidromeError("Navidrome omitted the published playlist ID.")
         if matches and created["id"] != matches[0]:
             raise NavidromeError("Navidrome returned a different playlist ID.")
+        if rename:
+            self.request("updatePlaylist", playlistId=created["id"], name=name)
         return created["id"]

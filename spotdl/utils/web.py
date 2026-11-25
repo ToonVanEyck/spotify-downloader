@@ -13,7 +13,16 @@ from argparse import Namespace
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Optional, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    Optional,
+    TypeVar,
+    Union,
+)
 
 from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.staticfiles import StaticFiles
@@ -50,6 +59,41 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+DownloadResult = TypeVar("DownloadResult")
+
+
+class DownloadQueue:
+    """Run one web download at a time, in order of arrival."""
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+
+    async def run(
+        self, download: Callable[[], Awaitable[DownloadResult]]
+    ) -> DownloadResult:
+        """Wait for a slot, keeping it until any in-flight thread work finishes."""
+
+        async with self._lock:
+            task = asyncio.ensure_future(download())
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                # Cancelling an await does not stop yt-dlp/ffmpeg worker threads.
+                while not task.done():
+                    try:
+                        await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:  # pylint: disable=broad-exception-caught
+                        break
+                if not task.cancelled() and task.exception() is not None:
+                    logger.error(
+                        "Download failed after its request was cancelled",
+                        exc_info=task.exception(),
+                    )
+                raise
+
 
 ALLOWED_ORIGINS = [
     "http://localhost:8800",
@@ -297,6 +341,12 @@ class Client:
             return "\n".join(self.log_lines)
 
     async def download_song(self, song: Song) -> WebDownloadResult:
+        """Queue this track alongside radio downloads and library repairs."""
+
+        self.progress_handler.progress_tracker.update(song, 0, "Queued")
+        return await app_state.download_queue.run(lambda: self._download_song(song))
+
+    async def _download_song(self, song: Song) -> WebDownloadResult:
         """Check the shared Navidrome connection before starting any audio work."""
 
         tracker = self.progress_handler.progress_tracker
@@ -483,6 +533,9 @@ class ApplicationState:
     clients: Dict[str, Client] = {}
     logger: logging.Logger
     radio_monitor: Optional["RadioMonitor"] = None
+
+    def __init__(self) -> None:
+        self.download_queue = DownloadQueue()
 
 
 app_state: ApplicationState = ApplicationState()
