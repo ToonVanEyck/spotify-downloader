@@ -1043,6 +1043,183 @@ async def test_download_uses_source_spotify_id_and_requires_an_audio_file(
         await monitor.download(entry)
 
 
+@pytest.mark.parametrize(
+    ("station_artist", "title", "artists"),
+    [
+        ("The Weeknd ft Daft Punk", "I Feel It Coming", ["The Weeknd", "Daft Punk"]),
+        (
+            "Coldplay feat. Little Simz, Burna Boy, Elyanna & TINI",
+            "We Pray",
+            ["Coldplay", "Little Simz", "Burna Boy", "Elyanna", "TINI"],
+        ),
+        (
+            "Michael Buble ft Carly Rae Jepsen",
+            "Rockin' Around The Christmas Tree Jingle Bell Rock",
+            ["Michael Bublé", "Carly Rae Jepsen"],
+        ),
+        ("U2 and B.B. KING", "When Love Comes To Town", ["U2", "B.B. King"]),
+        ("CLASH", "The Magnificent Seven", ["The Clash"]),
+        (
+            "Shaggy ft Brian And Tony Gold",
+            "Hey Sexy Lady",
+            ["Shaggy", "Brian & Tony Gold"],
+        ),
+        (
+            "Swedish House Mafia Feat. John Martin",
+            "Don't You Worry Child",
+            ["Swedish House Mafia", "John Martin"],
+        ),
+        ("Felix Jaehn & Ray Dalton", "Call It Love", ["Felix Jaehn", "Ray Dalton"]),
+        ("Sam Fender feat. Olivia Dean", "Rein Me In", ["Sam Fender", "Olivia Dean"]),
+    ],
+)
+@pytest.mark.parametrize("linked", [True, False])
+async def test_download_matches_radio_collaborations(
+    monitor, tmp_path, mocker, station_artist, title, artists, linked
+):
+    song = SimpleNamespace(
+        name=title, artist=artists[0], artists=artists, album_artist=artists[0]
+    )
+    mocker.patch.object(radio.Song, "from_url", return_value=song)
+    search = mocker.patch.object(radio, "get_search_results", return_value=[song])
+    audio = tmp_path / "song.mp3"
+    audio.write_bytes(b"test audio")
+    monitor.downloader = mocker.Mock()
+    monitor.downloader.pool_download = mocker.AsyncMock(return_value=(song, audio))
+    entry = RadioPlay(
+        play().played_at,
+        station_artist,
+        title,
+        "https://open.spotify.com/track/id" if linked else "",
+    )
+
+    assert await monitor.download(entry) == audio
+    assert search.call_count == int(not linked)
+    monitor.downloader.pool_download.assert_awaited_once_with(song)
+
+
+async def test_collaboration_search_falls_back_to_primary_artist(
+    monitor, tmp_path, mocker
+):
+    song = SimpleNamespace(
+        name="Song", artist="Artist", artists=["Artist", "Guest"], album_artist="Artist"
+    )
+    search = mocker.patch.object(radio, "get_search_results", side_effect=[[], [song]])
+    audio = tmp_path / "song.mp3"
+    audio.write_bytes(b"test audio")
+    monitor.downloader = mocker.Mock()
+    monitor.downloader.pool_download = mocker.AsyncMock(return_value=(song, audio))
+
+    entry = RadioPlay(play().played_at, "Artist feat. Guest", "Song")
+    assert await monitor.download(entry) == audio
+    assert [call.args[0] for call in search.call_args_list] == [
+        "Artist feat. Guest Song",
+        "Artist Song",
+    ]
+
+
+async def test_ampersand_search_falls_back_to_primary_artist(monitor, tmp_path, mocker):
+    song = SimpleNamespace(
+        name="Song", artist="Artist", artists=["Artist", "Guest"], album_artist="Artist"
+    )
+    search = mocker.patch.object(radio, "get_search_results", side_effect=[[], [song]])
+    audio = tmp_path / "song.mp3"
+    audio.write_bytes(b"test audio")
+    monitor.downloader = mocker.Mock()
+    monitor.downloader.pool_download = mocker.AsyncMock(return_value=(song, audio))
+
+    entry = RadioPlay(play().played_at, "Artist & Guest", "Song")
+    assert await monitor.download(entry) == audio
+    assert [call.args[0] for call in search.call_args_list] == [
+        "Artist & Guest Song",
+        "Artist Song",
+    ]
+
+
+@pytest.mark.parametrize("artist", ["Artist", "A Very Long Artist Name"])
+async def test_collaboration_rejects_wrong_guest(monitor, mocker, artist):
+    song = SimpleNamespace(
+        name="Song", artist=artist, artists=[artist, "Other"], album_artist=artist
+    )
+    mocker.patch.object(radio, "get_search_results", return_value=[song])
+    with pytest.raises(RadioError, match="matching Spotify"):
+        await monitor.download(
+            RadioPlay(play().played_at, f"{artist} feat. Guest", "Song")
+        )
+    assert monitor.downloader is None
+
+
+async def test_collaboration_matches_spotify_feature_in_title(
+    monitor, tmp_path, mocker
+):
+    song = SimpleNamespace(
+        name="Song (feat. Guest)",
+        artist="Artist",
+        artists=["Artist", "Guest"],
+        album_artist="Artist",
+    )
+    mocker.patch.object(radio, "get_search_results", return_value=[song])
+    audio = tmp_path / "song.mp3"
+    audio.write_bytes(b"test audio")
+    monitor.downloader = mocker.Mock()
+    monitor.downloader.pool_download = mocker.AsyncMock(return_value=(song, audio))
+    entry = RadioPlay(play().played_at, "Artist feat. Guest", "Song")
+
+    assert await monitor.download(entry) == audio
+
+
+async def test_collaboration_rejects_different_title_version(monitor, mocker):
+    song = SimpleNamespace(
+        name="Song (Live)",
+        artist="Artist",
+        artists=["Artist", "Guest"],
+        album_artist="Artist",
+    )
+    mocker.patch.object(radio, "get_search_results", return_value=[song])
+    with pytest.raises(RadioError, match="matching Spotify"):
+        await monitor.download(RadioPlay(play().played_at, "Artist ft Guest", "Song"))
+
+
+@pytest.mark.parametrize("linked", [True, False])
+async def test_download_matches_theme_from_title_suffix(
+    monitor, tmp_path, mocker, linked
+):
+    song = SimpleNamespace(
+        name='I\'ll Be There for You - Theme From "Friends"',
+        artist="The Rembrandts",
+        album_artist="The Rembrandts",
+    )
+    mocker.patch.object(radio.Song, "from_url", return_value=song)
+    search = mocker.patch.object(radio, "get_search_results", return_value=[song])
+    audio = tmp_path / "song.mp3"
+    audio.write_bytes(b"test audio")
+    monitor.downloader = mocker.Mock()
+    monitor.downloader.pool_download = mocker.AsyncMock(return_value=(song, audio))
+    entry = RadioPlay(
+        play().played_at,
+        "The Rembrandts",
+        "I'll Be There For You",
+        "https://open.spotify.com/track/15tHagkk8z306XkyOHqiip" if linked else "",
+    )
+
+    assert await monitor.download(entry) == audio
+    assert search.call_count == int(not linked)
+    monitor.downloader.pool_download.assert_awaited_once_with(song)
+
+
+async def test_theme_suffix_does_not_hide_live_version(monitor, mocker):
+    song = SimpleNamespace(
+        name='I\'ll Be There For You - Theme From "Friends" - Live',
+        artist="The Rembrandts",
+        album_artist="The Rembrandts",
+    )
+    mocker.patch.object(radio, "get_search_results", return_value=[song])
+    entry = RadioPlay(play().played_at, "The Rembrandts", "I'll Be There For You")
+
+    with pytest.raises(RadioError, match="matching Spotify"):
+        await monitor.download(entry)
+
+
 @pytest.mark.parametrize("linked", [True, False])
 async def test_radio_skips_compilation_in_favor_of_artist_release(
     monitor, tmp_path, mocker, linked

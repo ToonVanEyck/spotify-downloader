@@ -125,6 +125,54 @@ class RadioPlay:
         ).hexdigest()
 
 
+def _artist_text(value: str) -> str:
+    return normalize_track_text(value.replace("&", " and "))
+
+
+def _radio_artist_matches(play_artist: str, candidate: Song) -> bool:
+    radio_artist = _artist_text(play_artist)
+    primary = _artist_text(candidate.artist or "")
+    if not primary or not radio_artist:
+        return False
+    radio_without_the = re.sub(r"^the ", "", radio_artist)
+    primary_without_the = re.sub(r"^the ", "", primary)
+    if radio_without_the == primary_without_the:
+        return True
+    if not radio_without_the.startswith(primary_without_the + " "):
+        return ratio(primary, radio_artist) >= 85
+
+    remaining = radio_without_the[len(primary_without_the) :].strip()
+    collaborators = [_artist_text(artist) for artist in candidate.artists[1:]]
+    collaborators = sorted(
+        (name for name in collaborators if name), key=len, reverse=True
+    )
+    if not collaborators:
+        return False
+    names = "|".join(re.escape(name) for name in collaborators)
+    return bool(
+        re.fullmatch(
+            rf"(?:(?:feat|ft|featuring|with|and|x|vs) )?(?:{names})"
+            rf"(?: (?:(?:feat|ft|featuring|with|and|x|vs) )?(?:{names}))*",
+            remaining,
+        )
+    )
+
+
+def _radio_track_title(title: str) -> str:
+    title = re.sub(
+        r"\s*[\[(]\s*(?:feat|ft|featuring)\.?\s+[^)\]]+[\])]\s*$",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(
+        r'\s+-\s+theme from\s+(?:"[^"]+"|[^"()\[\]-]+)\s*$',
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
+
+
 def parse_radio_history(html: str) -> list[RadioPlay]:
     """Extract playable tracks, excluding news and other non-song broadcasts."""
 
@@ -884,17 +932,17 @@ class RadioMonitor:
         """Resolve radio metadata through spotDL and download the matching song."""
 
         def matches(candidate: Song) -> bool:
+            candidate_title = candidate.name or ""
+            play_title = play.title
+            if _radio_track_title(play_title) == play_title:
+                candidate_title = _radio_track_title(candidate_title)
             return (
                 ratio(
-                    normalize_track_text(candidate.name or ""),
-                    normalize_track_text(play.title),
+                    normalize_track_text(candidate_title),
+                    normalize_track_text(play_title),
                 )
                 >= 85
-                and ratio(
-                    normalize_track_text(candidate.artist or ""),
-                    normalize_track_text(play.search_artist),
-                )
-                >= 85
+                and _radio_artist_matches(play.search_artist, candidate)
                 and normalize_track_text(candidate.album_artist or "")
                 == normalize_track_text(candidate.artist or "")
             )
@@ -912,13 +960,22 @@ class RadioMonitor:
                 )
                 song = None
         if song is None:
-            songs = await asyncio.to_thread(
-                get_search_results, f"{play.search_artist} {play.title}", limit=5
-            )
-            song = next(
-                (candidate for candidate in songs if matches(candidate)),
-                None,
-            )
+            primary_artist = re.split(
+                r"\s+(?:feat\.?|ft\.?|featuring|with|and|x|vs)\s+|\s*&\s*",
+                play.search_artist,
+                maxsplit=1,
+                flags=re.IGNORECASE,
+            )[0]
+            queries = [f"{play.search_artist} {play.title}"]
+            if primary_artist != play.search_artist:
+                queries.append(f"{primary_artist} {play.title}")
+            for query in queries:
+                songs = await asyncio.to_thread(get_search_results, query, limit=5)
+                song = next(
+                    (candidate for candidate in songs if matches(candidate)), None
+                )
+                if song is not None:
+                    break
             if song is None:
                 raise RadioError("No matching Spotify recording found for this play.")
         if self.downloader is None:

@@ -303,13 +303,17 @@ connection stays inside a trusted local network.
   a different recording, spotDL logs a warning and searches Spotify by artist and
   title instead, just as when no link is available. If no matching recording is
   found, the play fails and follows the normal retry schedule.
+- Radio artist matching recognizes featured and collaborating artists in Spotify
+  metadata. If the full broadcast artist search finds no match, spotDL also
+  searches using the primary artist and title. A Spotify title's trailing
+  `- Theme From ...` description is ignored when the broadcast omits it.
 - Radio downloads also require the Spotify album artist to equal the track's
   primary artist, ignoring case, accents, and punctuation. A linked release with
   a different album artist triggers artist/title search; search results with a
   different or missing album artist are skipped. This avoids Various Artists
   compilations, but can also exclude collaborations or classical releases whose
   album and track artists differ. If no eligible result is found among the first
-  five search results, the play follows the normal retry schedule.
+  five results of each search, the play follows the normal retry schedule.
 - Nostalgie returns the latest API page (currently 15 plays); songs are found
   by artist and title. Its timestamps have no timezone, so they are interpreted
   as Brussels local time. Repeated times during the autumn clock change cannot
